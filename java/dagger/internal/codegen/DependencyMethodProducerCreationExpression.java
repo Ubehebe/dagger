@@ -19,8 +19,8 @@ package dagger.internal.codegen;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.squareup.javapoet.MethodSpec.methodBuilder;
 import static com.squareup.javapoet.TypeSpec.anonymousClassBuilder;
+import static dagger.internal.codegen.TypeNames.dependencyMethodProducerOf;
 import static dagger.internal.codegen.TypeNames.listenableFutureOf;
-import static dagger.internal.codegen.TypeNames.producerOf;
 import static javax.lang.model.element.Modifier.FINAL;
 import static javax.lang.model.element.Modifier.PRIVATE;
 import static javax.lang.model.element.Modifier.PUBLIC;
@@ -40,44 +40,41 @@ import dagger.internal.codegen.FrameworkFieldInitializer.FrameworkInstanceCreati
 final class DependencyMethodProducerCreationExpression
     implements FrameworkInstanceCreationExpression {
   private final ContributionBinding binding;
-  private final GeneratedComponentModel generatedComponentModel;
-  private final ComponentRequirementFields componentRequirementFields;
+  private final ComponentImplementation componentImplementation;
+  private final ComponentRequirementExpressions componentRequirementExpressions;
   private final BindingGraph graph;
 
   DependencyMethodProducerCreationExpression(
       ContributionBinding binding,
-      GeneratedComponentModel generatedComponentModel,
-      ComponentRequirementFields componentRequirementFields,
+      ComponentImplementation componentImplementation,
+      ComponentRequirementExpressions componentRequirementExpressions,
       BindingGraph graph) {
     this.binding = checkNotNull(binding);
-    this.generatedComponentModel = checkNotNull(generatedComponentModel);
-    this.componentRequirementFields = checkNotNull(componentRequirementFields);
+    this.componentImplementation = checkNotNull(componentImplementation);
+    this.componentRequirementExpressions = checkNotNull(componentRequirementExpressions);
     this.graph = checkNotNull(graph);
   }
 
   @Override
   public CodeBlock creationExpression() {
     ComponentRequirement dependency =
-        graph
-            .componentDescriptor()
-            .dependenciesByDependencyMethod()
-            .get(binding.bindingElement().get());
+        graph.componentDescriptor().getDependencyThatDefinesMethod(binding.bindingElement().get());
     FieldSpec dependencyField =
         FieldSpec.builder(
                 ClassName.get(dependency.typeElement()), dependency.variableName(), PRIVATE, FINAL)
             .initializer(
-                componentRequirementFields.getExpressionDuringInitialization(
-                    dependency, generatedComponentModel.name()))
+                componentRequirementExpressions.getExpressionDuringInitialization(
+                    dependency, componentImplementation.name()))
             .build();
     // TODO(b/70395982): Explore using a private static type instead of an anonymous class.
     TypeName keyType = TypeName.get(binding.key().type());
     return CodeBlock.of(
         "$L",
         anonymousClassBuilder("")
-            .superclass(producerOf(keyType))
+            .superclass(dependencyMethodProducerOf(keyType))
             .addField(dependencyField)
             .addMethod(
-                methodBuilder("get")
+                methodBuilder("callDependencyMethod")
                     .addAnnotation(Override.class)
                     .addModifiers(PUBLIC)
                     .returns(listenableFutureOf(keyType))

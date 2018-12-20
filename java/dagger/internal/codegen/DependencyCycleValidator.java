@@ -38,7 +38,6 @@ import com.google.common.graph.ImmutableNetwork;
 import com.google.common.graph.MutableNetwork;
 import com.google.common.graph.NetworkBuilder;
 import dagger.model.BindingGraph;
-import dagger.model.BindingGraph.BindingNode;
 import dagger.model.BindingGraph.ComponentNode;
 import dagger.model.BindingGraph.DependencyEdge;
 import dagger.model.BindingGraph.Node;
@@ -133,7 +132,7 @@ final class DependencyCycleValidator implements BindingGraphPlugin {
     ComponentNode componentContainingCycle =
         bindingGraph.componentNode(someCycleNode.componentPath()).get();
     ImmutableList<Node> pathToCycle =
-        shortestPath(bindingGraph, componentContainingCycle, someCycleNode);
+        shortestPath(bindingGraph.network(), componentContainingCycle, someCycleNode);
     return subpathToCycle(pathToCycle, cycle);
   }
 
@@ -171,7 +170,7 @@ final class DependencyCycleValidator implements BindingGraphPlugin {
    * #breaksCycle(DependencyEdge, BindingGraph) break} a cycle.
    */
   private DependencyEdge nonCycleBreakingEdge(EndpointPair<Node> endpointPair, BindingGraph graph) {
-    return graph.edgesConnecting(endpointPair.source(), endpointPair.target()).stream()
+    return graph.network().edgesConnecting(endpointPair.source(), endpointPair.target()).stream()
         .flatMap(instancesOf(DependencyEdge.class))
         .filter(edge -> !breaksCycle(edge, graph))
         .findFirst()
@@ -185,9 +184,9 @@ final class DependencyCycleValidator implements BindingGraphPlugin {
     if (breaksCycle(edge.dependencyRequest().key().type(), edge.dependencyRequest().kind())) {
       return true;
     }
-    Node target = graph.incidentNodes(edge).target();
-    if (target instanceof BindingNode
-        && ((BindingNode) target).binding().kind().equals(BindingKind.OPTIONAL)) {
+    Node target = graph.network().incidentNodes(edge).target();
+    if (target instanceof dagger.model.Binding
+        && ((dagger.model.Binding) target).kind().equals(BindingKind.OPTIONAL)) {
       /* For @BindsOptionalOf bindings, unwrap the type inside the Optional. If the unwrapped type
        * breaks the cycle, so does the optional binding. */
       TypeMirror optionalValueType = OptionalType.from(edge.dependencyRequest().key()).valueType();
@@ -218,7 +217,7 @@ final class DependencyCycleValidator implements BindingGraphPlugin {
 
   private DependencyEdge chooseDependencyEdgeConnecting(
       Node source, Node target, BindingGraph bindingGraph) {
-    return bindingGraph.edgesConnecting(source, target).stream()
+    return bindingGraph.network().edgesConnecting(source, target).stream()
         .flatMap(instancesOf(DependencyEdge.class))
         .findFirst()
         .get();
@@ -228,15 +227,15 @@ final class DependencyCycleValidator implements BindingGraphPlugin {
   private ImmutableNetwork<Node, DependencyEdge> nonCycleBreakingDependencyGraph(
       BindingGraph bindingGraph) {
     MutableNetwork<Node, DependencyEdge> dependencyNetwork =
-        NetworkBuilder.from(bindingGraph)
-            .expectedNodeCount(bindingGraph.nodes().size())
+        NetworkBuilder.from(bindingGraph.network())
+            .expectedNodeCount(bindingGraph.network().nodes().size())
             .expectedEdgeCount(bindingGraph.dependencyEdges().size())
             .build();
     bindingGraph.dependencyEdges().stream()
         .filter(edge -> !breaksCycle(edge, bindingGraph))
         .forEach(
             edge -> {
-              EndpointPair<Node> endpoints = bindingGraph.incidentNodes(edge);
+              EndpointPair<Node> endpoints = bindingGraph.network().incidentNodes(edge);
               dependencyNetwork.addEdge(endpoints.source(), endpoints.target(), edge);
             });
     return ImmutableNetwork.copyOf(dependencyNetwork);

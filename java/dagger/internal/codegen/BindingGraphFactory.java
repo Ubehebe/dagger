@@ -23,11 +23,12 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.Iterables.isEmpty;
 import static dagger.internal.codegen.ComponentDescriptor.isComponentContributionMethod;
-import static dagger.internal.codegen.ComponentRequirement.Kind.BOUND_INSTANCE;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
 import static dagger.internal.codegen.RequestKinds.getRequestKind;
+import static dagger.internal.codegen.SourceFiles.generatedMonitoringModuleName;
 import static dagger.internal.codegen.Util.reentrantComputeIfAbsent;
 import static dagger.model.BindingKind.DELEGATE;
+import static dagger.model.BindingKind.INJECTION;
 import static dagger.model.BindingKind.OPTIONAL;
 import static dagger.model.BindingKind.SUBCOMPONENT_BUILDER;
 import static java.util.function.Predicate.isEqual;
@@ -39,23 +40,18 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimaps;
 import com.google.common.collect.Sets;
 import dagger.MembersInjector;
 import dagger.Reusable;
-import dagger.internal.codegen.ComponentDescriptor.BuilderRequirementMethod;
-import dagger.internal.codegen.ComponentDescriptor.ComponentMethodDescriptor;
-import dagger.internal.codegen.ComponentDescriptor.ComponentMethodKind;
-import dagger.model.ComponentPath;
 import dagger.model.DependencyRequest;
 import dagger.model.Key;
+import dagger.model.RequestKind;
 import dagger.model.Scope;
 import dagger.producers.Produced;
 import dagger.producers.Producer;
-import dagger.releasablereferences.CanReleaseReferences;
-import dagger.releasablereferences.ReleasableReferenceManager;
+import dagger.producers.internal.ProductionExecutorModule;
 import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Deque;
@@ -71,7 +67,6 @@ import java.util.Set;
 import java.util.function.Function;
 import javax.inject.Inject;
 import javax.inject.Provider;
-import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;
 
@@ -81,8 +76,8 @@ final class BindingGraphFactory {
   private final InjectBindingRegistry injectBindingRegistry;
   private final KeyFactory keyFactory;
   private final BindingFactory bindingFactory;
-  private final IncorrectlyInstalledBindsMethodsValidator incorrectlyInstalledBindsMethodsValidator;
   private final CompilerOptions compilerOptions;
+  private final ModuleDescriptor.Factory moduleDescriptorFactory;
 
   @Inject
   BindingGraphFactory(
@@ -90,13 +85,13 @@ final class BindingGraphFactory {
       InjectBindingRegistry injectBindingRegistry,
       KeyFactory keyFactory,
       BindingFactory bindingFactory,
-      IncorrectlyInstalledBindsMethodsValidator incorrectlyInstalledBindsMethodsValidator,
+      ModuleDescriptor.Factory moduleDescriptorFactory,
       CompilerOptions compilerOptions) {
     this.elements = elements;
     this.injectBindingRegistry = injectBindingRegistry;
     this.keyFactory = keyFactory;
     this.bindingFactory = bindingFactory;
-    this.incorrectlyInstalledBindsMethodsValidator = incorrectlyInstalledBindsMethodsValidator;
+    this.moduleDescriptorFactory = moduleDescriptorFactory;
     this.compilerOptions = compilerOptions;
   }
 
@@ -113,9 +108,11 @@ final class BindingGraphFactory {
     ImmutableSet.Builder<DelegateDeclaration> delegatesBuilder = ImmutableSet.builder();
     ImmutableSet.Builder<OptionalBindingDeclaration> optionalsBuilder = ImmutableSet.builder();
 
-    // binding for the component itself
-    explicitBindingsBuilder.add(
-        bindingFactory.componentBinding(componentDescriptor.componentDefinitionType()));
+    if (!componentDescriptor.kind().isForModuleValidation()) {
+      // binding for the component itself
+      explicitBindingsBuilder.add(
+          bindingFactory.componentBinding(componentDescriptor.typeElement()));
+    }
 
     // Collect Component dependencies.
     for (ComponentRequirement dependency : componentDescriptor.dependencies()) {
@@ -131,42 +128,42 @@ final class BindingGraphFactory {
       }
     }
 
-    // Collect bindings on the builder.
-    if (componentDescriptor.builderSpec().isPresent()) {
-      for (BuilderRequirementMethod method :
-          componentDescriptor.builderSpec().get().requirementMethods()) {
-        if (method.requirement().kind().equals(BOUND_INSTANCE)) {
-          explicitBindingsBuilder.add(bindingFactory.boundInstanceBinding(method));
-        }
-      }
-    }
+    // Collect bindings on the creator.
+    componentDescriptor
+        .creatorDescriptor()
+        .ifPresent(
+            creatorDescriptor ->
+                creatorDescriptor.boundInstanceRequirements().stream()
+                    .map(
+                        requirement ->
+                            bindingFactory.boundInstanceBinding(
+                                requirement, creatorDescriptor.elementForRequirement(requirement)))
+                    .forEach(explicitBindingsBuilder::add));
 
-    for (Map.Entry<ComponentMethodDescriptor, ComponentDescriptor> componentMethodAndSubcomponent :
-        componentDescriptor.subcomponentsByBuilderMethod().entrySet()) {
-      ComponentMethodDescriptor componentMethod = componentMethodAndSubcomponent.getKey();
-      ComponentDescriptor subcomponentDescriptor = componentMethodAndSubcomponent.getValue();
-      if (!componentDescriptor.subcomponentsFromModules().contains(subcomponentDescriptor)) {
-        explicitBindingsBuilder.add(
-            bindingFactory.subcomponentBuilderBinding(
-                componentMethod.methodElement(), componentDescriptor.componentDefinitionType()));
-      }
-    }
+    componentDescriptor
+        .childComponentsDeclaredByBuilderEntryPoints()
+        .forEach(
+            (builderEntryPoint, childComponent) -> {
+              if (!componentDescriptor
+                  .childComponentsDeclaredByModules()
+                  .contains(childComponent)) {
+                explicitBindingsBuilder.add(
+                    bindingFactory.subcomponentCreatorBinding(
+                        builderEntryPoint.methodElement(), componentDescriptor.typeElement()));
+              }
+            });
 
     ImmutableSet.Builder<MultibindingDeclaration> multibindingDeclarations = ImmutableSet.builder();
     ImmutableSet.Builder<SubcomponentDeclaration> subcomponentDeclarations = ImmutableSet.builder();
 
     // Collect transitive module bindings and multibinding declarations.
-    for (ModuleDescriptor moduleDescriptor : componentDescriptor.transitiveModules()) {
+    for (ModuleDescriptor moduleDescriptor : modules(componentDescriptor, parentResolver)) {
       explicitBindingsBuilder.addAll(moduleDescriptor.bindings());
       multibindingDeclarations.addAll(moduleDescriptor.multibindingDeclarations());
       subcomponentDeclarations.addAll(moduleDescriptor.subcomponentDeclarations());
       delegatesBuilder.addAll(moduleDescriptor.delegateDeclarations());
       optionalsBuilder.addAll(moduleDescriptor.optionalDeclarations());
     }
-
-    ImmutableSetMultimap<Scope, ProvisionBinding> releasableReferenceManagerBindings =
-        getReleasableReferenceManagerBindings(componentDescriptor);
-    explicitBindingsBuilder.addAll(releasableReferenceManagerBindings.values());
 
     final Resolver requestResolver =
         new Resolver(
@@ -177,14 +174,11 @@ final class BindingGraphFactory {
             indexBindingDeclarationsByKey(subcomponentDeclarations.build()),
             indexBindingDeclarationsByKey(delegatesBuilder.build()),
             indexBindingDeclarationsByKey(optionalsBuilder.build()));
-    for (ComponentMethodDescriptor componentMethod : componentDescriptor.componentMethods()) {
-      if (componentMethod.kind().equals(ComponentMethodKind.MEMBERS_INJECTION)) {
-        requestResolver.resolveMembersInjectionMethod(componentMethod);
+    for (DependencyRequest entryPoint : componentDescriptor.entryPoints()) {
+      if (entryPoint.kind().equals(RequestKind.MEMBERS_INJECTION)) {
+        requestResolver.resolveMembersInjection(entryPoint.key());
       } else {
-        Optional<DependencyRequest> componentMethodRequest = componentMethod.dependencyRequest();
-        if (componentMethodRequest.isPresent()) {
-          requestResolver.resolve(componentMethodRequest.get().key());
-        }
+        requestResolver.resolve(entryPoint.key());
       }
     }
 
@@ -194,7 +188,7 @@ final class BindingGraphFactory {
     // done in a queue since resolving one subcomponent might resolve a key for a subcomponent
     // from a parent graph. This is done until no more new subcomponents are resolved.
     Set<ComponentDescriptor> resolvedSubcomponents = new HashSet<>();
-    ImmutableSet.Builder<BindingGraph> subgraphs = ImmutableSet.builder();
+    ImmutableList.Builder<BindingGraph> subgraphs = ImmutableList.builder();
     for (ComponentDescriptor subcomponent :
         Iterables.consumingIterable(requestResolver.subcomponentsToResolve)) {
       if (resolvedSubcomponents.add(subcomponent)) {
@@ -217,73 +211,52 @@ final class BindingGraphFactory {
         resolvedContributionBindingsMap,
         requestResolver.getResolvedMembersInjectionBindings(),
         subgraphs.build(),
-        getScopesRequiringReleasableReferenceManagers(
-            releasableReferenceManagerBindings, resolvedContributionBindingsMap.keySet()),
         requestResolver.getOwnedModules(),
         requestResolver.getFactoryMethod());
   }
 
   /**
-   * Returns the bindings for {@link ReleasableReferenceManager}s for all {@link
-   * CanReleaseReferences @CanReleaseReferences} scopes.
+   * Returns all the modules that should be installed in the component. For production components
+   * and production subcomponents that have a parent that is not a production component or
+   * subcomponent, also includes the production monitoring module for the component and the
+   * production executor module.
    */
-  private ImmutableSetMultimap<Scope, ProvisionBinding> getReleasableReferenceManagerBindings(
-      ComponentDescriptor componentDescriptor) {
-    ImmutableSetMultimap.Builder<Scope, ProvisionBinding> bindings = ImmutableSetMultimap.builder();
-    // TODO(dpb,gak): Do we need to bind an empty Set<ReleasableReferenceManager> if there are
-    // none?
-    for (Scope scope : componentDescriptor.releasableReferencesScopes()) {
-      // Add a binding for @ForReleasableReferences(scope) ReleasableReferenceManager.
-      bindings.put(scope, bindingFactory.releasableReferenceManagerBinding(scope));
+  private ImmutableSet<ModuleDescriptor> modules(
+      ComponentDescriptor componentDescriptor, Optional<Resolver> parentResolver) {
+    return shouldIncludeImplicitProductionModules(componentDescriptor, parentResolver)
+        ? new ImmutableSet.Builder<ModuleDescriptor>()
+            .addAll(componentDescriptor.modules())
+            .add(descriptorForMonitoringModule(componentDescriptor.typeElement()))
+            .add(descriptorForProductionExecutorModule())
+            .build()
+        : componentDescriptor.modules();
+  }
 
-      /* Add a binding for Set<ReleasableReferenceManager>. Even if these are added more than
-       * once, each instance will be equal to the rest. Since they're being added to a set, there
-       * will be only one instance. */
-      bindings.put(scope, bindingFactory.setOfReleasableReferenceManagersBinding());
-
-      for (AnnotationMirror metadata : scope.releasableReferencesMetadata()) {
-        // Add a binding for @ForReleasableReferences(scope) TypedReleasableReferenceManager<M>.
-        bindings.put(
-            scope,
-            bindingFactory.typedReleasableReferenceManagerBinding(
-                scope, metadata.getAnnotationType()));
-
-        /* Add a binding for Set<TypedReleasableReferenceManager<M>>. Even if these are added more
-         * than once, each instance will be equal to the rest. Since they're being added to a set,
-         * there will be only one instance. */
-        bindings.put(
-            scope,
-            bindingFactory.setOfTypedReleasableReferenceManagersBinding(
-                metadata.getAnnotationType()));
-      }
-    }
-    return bindings.build();
+  private boolean shouldIncludeImplicitProductionModules(
+      ComponentDescriptor componentDescriptor, Optional<Resolver> parentResolver) {
+    ComponentKind kind = componentDescriptor.kind();
+    return kind.isProducer()
+        && ((kind.isTopLevel() && !kind.isForModuleValidation())
+            || (parentResolver.isPresent()
+                && !parentResolver.get().componentDescriptor.kind().isProducer()));
   }
 
   /**
-   * Returns the set of scopes that will be returned by {@link
-   * BindingGraph#scopesRequiringReleasableReferenceManagers()}.
+   * Returns a descriptor for a generated module that handles monitoring for production components.
+   * This module is generated in the {@link MonitoringModuleProcessingStep}.
    *
-   * @param releasableReferenceManagerBindings the {@link ReleasableReferenceManager} bindings for
-   *     each scope
-   * @param resolvedContributionKeys the keys of the resolved bindings for the component
+   * @throws TypeNotPresentException if the module has not been generated yet. This will cause the
+   *     processor to retry in a later processing round.
    */
-  private ImmutableSet<Scope> getScopesRequiringReleasableReferenceManagers(
-      ImmutableSetMultimap<Scope, ProvisionBinding> releasableReferenceManagerBindings,
-      ImmutableSet<Key> resolvedContributionKeys) {
-    ImmutableSet.Builder<Scope> scopes = ImmutableSet.builder();
-    releasableReferenceManagerBindings
-        .asMap()
-        .forEach(
-            (scope, bindings) -> {
-              for (Binding binding : bindings) {
-                if (resolvedContributionKeys.contains(binding.key())) {
-                  scopes.add(scope);
-                  return;
-                }
-              }
-            });
-    return scopes.build();
+  private ModuleDescriptor descriptorForMonitoringModule(TypeElement componentDefinitionType) {
+    return moduleDescriptorFactory.create(
+        elements.checkTypePresent(
+            generatedMonitoringModuleName(componentDefinitionType).toString()));
+  }
+
+  /** Returns a descriptor {@link ProductionExecutorModule}. */
+  private ModuleDescriptor descriptorForProductionExecutorModule() {
+    return moduleDescriptorFactory.create(elements.getTypeElement(ProductionExecutorModule.class));
   }
 
   /** Indexes {@code bindingDeclarations} by {@link BindingDeclaration#key()}. */
@@ -318,7 +291,7 @@ final class BindingGraphFactory {
         ImmutableSetMultimap<Key, SubcomponentDeclaration> subcomponentDeclarations,
         ImmutableSetMultimap<Key, DelegateDeclaration> delegateDeclarations,
         ImmutableSetMultimap<Key, OptionalBindingDeclaration> optionalBindingDeclarations) {
-      this.parentResolver = checkNotNull(parentResolver);
+      this.parentResolver = parentResolver;
       this.componentDescriptor = checkNotNull(componentDescriptor);
       this.explicitBindings = checkNotNull(explicitBindings);
       this.explicitBindingsSet = ImmutableSet.copyOf(explicitBindings.values());
@@ -329,20 +302,18 @@ final class BindingGraphFactory {
       this.explicitMultibindings = multibindingContributionsByMultibindingKey(explicitBindingsSet);
       this.delegateMultibindingDeclarations =
           multibindingContributionsByMultibindingKey(delegateDeclarations.values());
-      subcomponentsToResolve.addAll(componentDescriptor.subcomponentsFromEntryPoints());
+      subcomponentsToResolve.addAll(
+          componentDescriptor.childComponentsDeclaredByFactoryMethods().values());
+      subcomponentsToResolve.addAll(
+          componentDescriptor.childComponentsDeclaredByBuilderEntryPoints().values());
     }
 
     /** Returns the optional factory method for this component. */
     Optional<ExecutableElement> getFactoryMethod() {
       return parentResolver
-          .map(
-              parent -> {
-                return parent
-                    .componentDescriptor
-                    .subcomponentsByFactoryMethod()
-                    .inverse()
-                    .get(componentDescriptor);
-              })
+          .flatMap(
+              parent ->
+                  parent.componentDescriptor.getFactoryMethodForChildComponent(componentDescriptor))
           .map(method -> method.methodElement());
     }
 
@@ -400,7 +371,9 @@ final class BindingGraphFactory {
 
       // If there are no bindings, add the implicit @Inject-constructed binding if there is one.
       if (bindings.isEmpty()) {
-        injectBindingRegistry.getOrFindProvisionBinding(requestKey).ifPresent(bindings::add);
+        injectBindingRegistry.getOrFindProvisionBinding(requestKey)
+            .filter(binding -> !isIncorrectlyScopedInPartialGraph(binding))
+            .ifPresent(bindings::add);
       }
 
       return ResolvedBindings.forContributionBindings(
@@ -410,6 +383,26 @@ final class BindingGraphFactory {
           multibindingDeclarations,
           subcomponentDeclarations,
           optionalBindingDeclarations);
+    }
+
+    /**
+     * Returns true if this binding graph resolution is for a partial graph and the {@code @Inject}
+     * binding's scope doesn't match any of the components in the current component ancestry. If so,
+     * the binding is not owned by any of the currently known components, and will be owned by a
+     * future ancestor (or, if never owned, will result in an incompatibly scoped binding error at
+     * the root component).
+     */
+    private boolean isIncorrectlyScopedInPartialGraph(ProvisionBinding binding) {
+      checkArgument(binding.kind().equals(INJECTION));
+      Resolver owningResolver = getOwningResolver(binding).orElse(this);
+      ComponentDescriptor owningComponent = owningResolver.componentDescriptor;
+      return !rootComponent().kind().isTopLevel()
+          && binding.scope().isPresent()
+          && !owningComponent.scopes().contains(binding.scope().get());
+    }
+
+    private ComponentDescriptor rootComponent() {
+      return parentResolver.map(Resolver::rootComponent).orElse(componentDescriptor);
     }
 
     /** Returns the resolved members injection bindings for the given {@link Key}. */
@@ -428,13 +421,13 @@ final class BindingGraphFactory {
      * ComponentDescriptor subcomponent} to a queue in the owning component's resolver. The queue
      * will be used to detect which subcomponents need to be resolved.
      */
-    private void addSubcomponentToOwningResolver(ProvisionBinding subcomponentBuilderBinding) {
-      checkArgument(subcomponentBuilderBinding.kind().equals(SUBCOMPONENT_BUILDER));
-      Resolver owningResolver = getOwningResolver(subcomponentBuilderBinding).get();
+    private void addSubcomponentToOwningResolver(ProvisionBinding subcomponentCreatorBinding) {
+      checkArgument(subcomponentCreatorBinding.kind().equals(SUBCOMPONENT_BUILDER));
+      Resolver owningResolver = getOwningResolver(subcomponentCreatorBinding).get();
 
-      TypeElement builderType = MoreTypes.asTypeElement(subcomponentBuilderBinding.key().type());
+      TypeElement builderType = MoreTypes.asTypeElement(subcomponentCreatorBinding.key().type());
       owningResolver.subcomponentsToResolve.add(
-          owningResolver.componentDescriptor.subcomponentsByBuilderType().get(builderType));
+          owningResolver.componentDescriptor.getChildComponentWithBuilderType(builderType));
     }
 
     private ImmutableSet<Key> keysMatchingRequest(Key requestKey) {
@@ -477,7 +470,7 @@ final class BindingGraphFactory {
         ImmutableSet<SubcomponentDeclaration> subcomponentDeclarations) {
       return subcomponentDeclarations.isEmpty()
           ? Optional.empty()
-          : Optional.of(bindingFactory.subcomponentBuilderBinding(subcomponentDeclarations));
+          : Optional.of(bindingFactory.subcomponentCreatorBinding(subcomponentDeclarations));
     }
 
     /**
@@ -599,6 +592,24 @@ final class BindingGraphFactory {
     }
 
     private Optional<Resolver> getOwningResolver(ContributionBinding binding) {
+      // TODO(ronshapiro): extract the different pieces of this method into their own methods
+      if ((binding.scope().isPresent() && binding.scope().get().isProductionScope())
+          || binding.bindingType().equals(BindingType.PRODUCTION)) {
+        for (Resolver requestResolver : getResolverLineage()) {
+          // Resolve @Inject @ProductionScope bindings at the highest production component.
+          if (binding.kind().equals(INJECTION)
+              && requestResolver.componentDescriptor.kind().isProducer()) {
+            return Optional.of(requestResolver);
+          }
+
+          // Resolve explicit @Produces and @ProductionScope bindings at the highest component that
+          // installs the binding.
+          if (requestResolver.containsExplicitBinding(binding)) {
+            return Optional.of(requestResolver);
+          }
+        }
+      }
+
       if (binding.scope().isPresent() && binding.scope().get().isReusable()) {
         for (Resolver requestResolver : getResolverLineage().reverse()) {
           // If a @Reusable binding was resolved in an ancestor, use that component.
@@ -613,9 +624,7 @@ final class BindingGraphFactory {
       }
 
       for (Resolver requestResolver : getResolverLineage().reverse()) {
-        if (requestResolver.explicitBindingsSet.contains(binding)
-            || resolverContainsDelegateDeclarationForBinding(requestResolver, binding)
-            || requestResolver.subcomponentDeclarations.containsKey(binding.key())) {
+        if (requestResolver.containsExplicitBinding(binding)) {
           return Optional.of(requestResolver);
         }
       }
@@ -633,80 +642,31 @@ final class BindingGraphFactory {
       return Optional.empty();
     }
 
-    /**
-     * Returns true if {@code binding} was installed in a module in this resolver's component. If
-     * {@link CompilerOptions#floatingBindsMethods()} is enabled, calls {@link
-     * #recordFloatingBindsMethod(Resolver, ContributionBinding)} and returns false.
-     */
-    private boolean resolverContainsDelegateDeclarationForBinding(
-        Resolver resolver, ContributionBinding binding) {
-      // TODO(ronshapiro): remove the flag once we feel enough time has passed, and return this
-      // value directly. At that point, this can be remove the resolver parameter and become a
-      // method invoked on a particular resolver
-      boolean resolverContainsDeclaration =
-          binding.kind().equals(DELEGATE)
-              && resolver
-                  .delegateDeclarations
-                  .get(binding.key())
-                  .stream()
-                  .anyMatch(
-                      declaration ->
-                          declaration.contributingModule().equals(binding.contributingModule())
-                              && declaration.bindingElement().equals(binding.bindingElement()));
-      if (resolverContainsDeclaration && compilerOptions.floatingBindsMethods()) {
-        recordFloatingBindsMethod(resolver, binding);
-        return false;
-      }
-      return resolverContainsDeclaration;
+    private boolean containsExplicitBinding(ContributionBinding binding) {
+      return explicitBindingsSet.contains(binding)
+          || resolverContainsDelegateDeclarationForBinding(binding)
+          || subcomponentDeclarations.containsKey(binding.key());
     }
 
-    /**
-     * Records binds methods that are resolved in the wrong component due to b/79859714. These will
-     * be reported later on in {@link IncorrectlyInstalledBindsMethodsValidator}.
-     */
-    private void recordFloatingBindsMethod(Resolver idealResolver, ContributionBinding binding) {
-      Resolver actualResolver = this;
-      if (binding.scope().isPresent()) {
-        for (Resolver requestResolver : getResolverLineage().reverse()) {
-          if (requestResolver.componentDescriptor.scopes().contains(binding.scope().get())) {
-            actualResolver = requestResolver;
-            break;
-          }
-        }
-      }
-      if (actualResolver != idealResolver) {
-        incorrectlyInstalledBindsMethodsValidator.recordBinding(
-            componentPath(idealResolver), binding);
-      }
-    }
-
-    /**
-     * Constructs a {@link ComponentPath} from the root component of this resolver to a {@code
-     * destination}.
-     */
-    private ComponentPath componentPath(Resolver destination) {
-      ImmutableList.Builder<TypeElement> path = ImmutableList.builder();
-      for (Resolver resolver : getResolverLineage()) {
-        path.add(resolver.componentDescriptor.componentDefinitionType());
-        if (resolver == destination) {
-          return ComponentPath.create(path.build());
-        }
-      }
-      throw new AssertionError(
-          String.format(
-              "%s not found in %s",
-              destination.componentDescriptor.componentDefinitionType(), path.build()));
+    /** Returns true if {@code binding} was installed in a module in this resolver's component. */
+    private boolean resolverContainsDelegateDeclarationForBinding(ContributionBinding binding) {
+      return binding.kind().equals(DELEGATE)
+          && delegateDeclarations.get(binding.key()).stream()
+              .anyMatch(
+                  declaration ->
+                      declaration.contributingModule().equals(binding.contributingModule())
+                          && declaration.bindingElement().equals(binding.bindingElement()));
     }
 
     /** Returns the resolver lineage from parent to child. */
     private ImmutableList<Resolver> getResolverLineage() {
-      List<Resolver> resolverList = Lists.newArrayList();
+      ImmutableList.Builder<Resolver> resolverList = ImmutableList.builder();
       for (Optional<Resolver> currentResolver = Optional.of(this);
           currentResolver.isPresent();
           currentResolver = currentResolver.get().parentResolver) {
         resolverList.add(currentResolver.get());
       }
-      return ImmutableList.copyOf(Lists.reverse(resolverList));
+      return resolverList.build().reverse();
     }
 
     /**
@@ -740,9 +700,13 @@ final class BindingGraphFactory {
     private ImmutableSet<ContributionBinding> getLocalExplicitBindings(Key key) {
       return new ImmutableSet.Builder<ContributionBinding>()
           .addAll(explicitBindings.get(key))
+          // @Binds @IntoMap declarations have key Map<K, V>, unlike @Provides @IntoMap or @Produces
+          // @IntoMap, which have Map<K, Provider/Producer<V>> keys. So unwrap the key's type's
+          // value type if it's a Map<K, Provider/Producer<V>> before looking in
+          // delegateDeclarations. createDelegateBindings() will create bindings with the properly
+          // wrapped key type.
           .addAll(
-              createDelegateBindings(
-                  delegateDeclarations.get(keyFactory.convertToDelegateKey(key))))
+              createDelegateBindings(delegateDeclarations.get(keyFactory.unwrapMapValueType(key))))
           .build();
     }
 
@@ -768,11 +732,14 @@ final class BindingGraphFactory {
       if (!MapType.isMap(key)
           || MapType.from(key).isRawType()
           || MapType.from(key).valuesAreFrameworkType()) {
-        // There are no @Binds @IntoMap delegate declarations for Map<K, V> requests. All
-        // @IntoMap requests must be for Map<K, Framework<V>>.
+        // @Binds @IntoMap declarations have key Map<K, V>, unlike @Provides @IntoMap or @Produces
+        // @IntoMap, which have Map<K, Provider/Producer<V>> keys. So unwrap the key's type's
+        // value type if it's a Map<K, Provider/Producer<V>> before looking in
+        // delegateMultibindingDeclarations. createDelegateBindings() will create bindings with the
+        // properly wrapped key type.
         multibindings.addAll(
             createDelegateBindings(
-                delegateMultibindingDeclarations.get(keyFactory.convertToDelegateKey(key))));
+                delegateMultibindingDeclarations.get(keyFactory.unwrapMapValueType(key))));
       }
       return multibindings.build();
     }
@@ -835,9 +802,7 @@ final class BindingGraphFactory {
       }
     }
 
-    private void resolveMembersInjectionMethod(ComponentMethodDescriptor componentMethod) {
-      checkArgument(componentMethod.kind().equals(ComponentMethodKind.MEMBERS_INJECTION));
-      Key key = componentMethod.dependencyRequest().get().key();
+    private void resolveMembersInjection(Key key) {
       ResolvedBindings bindings = lookUpMembersInjectionBinding(key);
       resolveDependencies(bindings);
       resolvedMembersInjectionBindings.put(key, bindings);
@@ -855,15 +820,16 @@ final class BindingGraphFactory {
         return;
       }
 
-      /* If the binding was previously resolved in a supercomponent, then we may be able to avoid
-       * resolving it here and just depend on the supercomponent resolution.
+      /*
+       * If the binding was previously resolved in an ancestor component, then we may be able to
+       * avoid resolving it here and just depend on the ancestor component resolution.
        *
        * 1. If it depends transitively on multibinding contributions or optional bindings with
        *    bindings from this subcomponent, then we have to resolve it in this subcomponent so
        *    that it sees the local bindings.
        *
        * 2. If there are any explicit bindings in this component, they may conflict with those in
-       *    the supercomponent, so resolve them here so that conflicts can be caught.
+       *    the ancestor component, so resolve them here so that conflicts can be caught.
        */
       if (getPreviouslyResolvedBindings(key).isPresent()) {
         /* Resolve in the parent in case there are multibinding contributions or conflicts in some
@@ -935,14 +901,13 @@ final class BindingGraphFactory {
       return parentResolver.isPresent()
           ? Sets.union(
                   parentResolver.get().getInheritedModules(),
-                  parentResolver.get().componentDescriptor.transitiveModules())
+                  parentResolver.get().componentDescriptor.modules())
               .immutableCopy()
           : ImmutableSet.<ModuleDescriptor>of();
     }
 
     ImmutableSet<ModuleDescriptor> getOwnedModules() {
-      return Sets.difference(componentDescriptor.transitiveModules(), getInheritedModules())
-          .immutableCopy();
+      return Sets.difference(componentDescriptor.modules(), getInheritedModules()).immutableCopy();
     }
 
     private final class LocalDependencyChecker {

@@ -17,6 +17,7 @@
 package dagger.internal.codegen;
 
 import static com.squareup.javapoet.MethodSpec.constructorBuilder;
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
 import static dagger.model.RequestKind.INSTANCE;
 import static javax.lang.model.element.Modifier.FINAL;
 import static javax.lang.model.element.Modifier.PRIVATE;
@@ -38,10 +39,10 @@ final class InnerSwitchingProviders extends SwitchingProviders {
   private final DaggerTypes types;
 
   InnerSwitchingProviders(
-      GeneratedComponentModel generatedComponentModel,
+      ComponentImplementation componentImplementation,
       ComponentBindingExpressions componentBindingExpressions,
       DaggerTypes types) {
-    super(generatedComponentModel, types);
+    super(componentImplementation, types);
     this.componentBindingExpressions = componentBindingExpressions;
     this.types = types;
   }
@@ -87,17 +88,17 @@ final class InnerSwitchingProviders extends SwitchingProviders {
     }
 
     @Override
-    public Expression getProviderExpression(ClassName switchType, int switchId) {
+    public Expression getProviderExpression(ClassName switchingProviderClass, int switchId) {
       TypeMirror instanceType = types.accessibleType(binding.contributedType(), requestingClass);
       return Expression.create(
           types.wrapType(instanceType, Provider.class),
-          CodeBlock.of("new $T<>($L)", switchType, switchId));
+          CodeBlock.of("new $T<>($L)", switchingProviderClass, switchId));
     }
 
     @Override
-    public Expression getReturnExpression() {
+    public Expression getReturnExpression(ClassName switchingProviderClass) {
       return componentBindingExpressions.getDependencyExpression(
-          binding.key(), INSTANCE, requestingClass);
+          bindingRequest(binding.key(), INSTANCE), switchingProviderClass);
     }
   }
 }

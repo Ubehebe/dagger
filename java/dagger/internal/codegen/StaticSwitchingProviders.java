@@ -19,6 +19,7 @@ package dagger.internal.codegen;
 import static com.squareup.javapoet.ClassName.OBJECT;
 import static com.squareup.javapoet.MethodSpec.constructorBuilder;
 import static com.squareup.javapoet.TypeName.INT;
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
 import static dagger.internal.codegen.CodeBlocks.makeParametersCodeBlock;
 import static dagger.internal.codegen.CodeBlocks.toParametersCodeBlock;
 import static dagger.internal.codegen.SourceFiles.generatedClassNameForBinding;
@@ -50,10 +51,10 @@ final class StaticSwitchingProviders extends SwitchingProviders {
   private final DaggerTypes types;
   private final ClassName owningComponent;
 
-  StaticSwitchingProviders(GeneratedComponentModel generatedComponentModel, DaggerTypes types) {
-    super(generatedComponentModel, types);
+  StaticSwitchingProviders(ComponentImplementation componentImplementation, DaggerTypes types) {
+    super(componentImplementation, types);
     this.types = types;
-    this.owningComponent = generatedComponentModel.name();
+    this.owningComponent = componentImplementation.name();
   }
 
   /**
@@ -104,7 +105,7 @@ final class StaticSwitchingProviders extends SwitchingProviders {
     }
 
     @Override
-    public Expression getProviderExpression(ClassName switchType, int switchId) {
+    public Expression getProviderExpression(ClassName switchingProviderClass, int switchId) {
       TypeMirror accessibleType = types.accessibleType(binding.contributedType(), owningComponent);
       // Java 7 type inference can't figure out that instance in
       // DoubleCheck.provider(new SwitchingProvider<>()) is Provider<T> and not Provider<Object>
@@ -119,20 +120,20 @@ final class StaticSwitchingProviders extends SwitchingProviders {
 
       return Expression.create(
           types.wrapType(accessibleType, Provider.class),
-          CodeBlock.of("new $T<$L>($L)", switchType, typeParameter, arguments));
+          CodeBlock.of("new $T<$L>($L)", switchingProviderClass, typeParameter, arguments));
     }
 
     @Override
-    public Expression getReturnExpression() {
+    public Expression getReturnExpression(ClassName switchingProviderClass) {
       return Expression.create(
           binding.contributedType(),
           CodeBlock.of(
               "$T.provideInstance($L)",
               generatedClassNameForBinding(binding),
-              getMethodArguments()));
+              getMethodArguments(switchingProviderClass)));
     }
 
-    private CodeBlock getMethodArguments() {
+    private CodeBlock getMethodArguments(ClassName switchingProviderClass) {
       int i = 0;
       ImmutableList.Builder<CodeBlock> arguments = ImmutableList.builder();
       if (binding.requiresModuleInstance()) {
@@ -141,7 +142,9 @@ final class StaticSwitchingProviders extends SwitchingProviders {
 
       for (FrameworkDependency dependency : binding.frameworkDependencies()) {
         TypeMirror type =
-            componentBindingExpressions.getDependencyExpression(dependency, owningComponent).type();
+            componentBindingExpressions
+                .getDependencyExpression(bindingRequest(dependency), switchingProviderClass)
+                .type();
         arguments.add(argument(type, i++));
       }
       return makeParametersCodeBlock(arguments.build());

@@ -61,13 +61,13 @@ abstract class SwitchingProviders {
     Key key();
 
     /** Returns the {@link Expression} that returns the provided instance for this case. */
-    Expression getReturnExpression();
+    Expression getReturnExpression(ClassName switchingProviderClass);
 
     /**
      * Returns the {@link Expression} that returns the {@code SwitchProvider} instance for this
      * case.
      */
-    Expression getProviderExpression(ClassName switchType, int switchId);
+    Expression getProviderExpression(ClassName switchingProviderClass, int switchId);
   }
 
   /**
@@ -90,15 +90,15 @@ abstract class SwitchingProviders {
   private final Map<Key, SwitchingProviderBuilder> switchingProviderBuilders =
       new LinkedHashMap<>();
 
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
   private final ClassName owningComponent;
   private final DaggerTypes types;
   private final UniqueNameSet switchingProviderNames = new UniqueNameSet();
 
-  SwitchingProviders(GeneratedComponentModel generatedComponentModel, DaggerTypes types) {
-    this.generatedComponentModel = checkNotNull(generatedComponentModel);
+  SwitchingProviders(ComponentImplementation componentImplementation, DaggerTypes types) {
+    this.componentImplementation = checkNotNull(componentImplementation);
     this.types = checkNotNull(types);
-    this.owningComponent = checkNotNull(generatedComponentModel).name();
+    this.owningComponent = checkNotNull(componentImplementation).name();
   }
 
   /** Returns the {@link TypeSpec} for a {@code SwitchingProvider} based on the given builder. */
@@ -118,7 +118,7 @@ abstract class SwitchingProviders {
       String name = switchingProviderNames.getUniqueName("SwitchingProvider");
       SwitchingProviderBuilder switchingProviderBuilder =
           new SwitchingProviderBuilder(owningComponent.nestedClass(name));
-      generatedComponentModel.addSwitchingProvider(switchingProviderBuilder::build);
+      componentImplementation.addSwitchingProvider(switchingProviderBuilder::build);
       return switchingProviderBuilder;
     }
     return getLast(switchingProviderBuilders.values());
@@ -147,7 +147,8 @@ abstract class SwitchingProviders {
     }
 
     private CodeBlock createSwitchCaseCodeBlock(SwitchCase switchCase) {
-      CodeBlock instanceCodeBlock = switchCase.getReturnExpression().box(types).codeBlock();
+      CodeBlock instanceCodeBlock =
+          switchCase.getReturnExpression(switchingProviderType).box(types).codeBlock();
 
       return CodeBlock.builder()
           // TODO(user): Is there something else more useful than the key?

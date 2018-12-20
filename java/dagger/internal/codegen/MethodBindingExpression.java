@@ -17,21 +17,30 @@
 package dagger.internal.codegen;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
+import dagger.internal.codegen.ComponentDescriptor.ComponentMethodDescriptor;
+import dagger.internal.codegen.ModifiableBindingMethods.ModifiableBindingMethod;
+import java.util.Optional;
 
 /** A binding expression that wraps another in a nullary method on the component. */
 abstract class MethodBindingExpression extends BindingExpression {
-
+  private final BindingRequest request;
   private final BindingMethodImplementation methodImplementation;
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
+  private final ProducerEntryPointView producerEntryPointView;
 
   protected MethodBindingExpression(
+      BindingRequest request,
       BindingMethodImplementation methodImplementation,
-      GeneratedComponentModel generatedComponentModel) {
+      ComponentImplementation componentImplementation,
+      DaggerTypes types) {
+    this.request = checkNotNull(request);
     this.methodImplementation = checkNotNull(methodImplementation);
-    this.generatedComponentModel = checkNotNull(generatedComponentModel);
+    this.componentImplementation = checkNotNull(componentImplementation);
+    this.producerEntryPointView = new ProducerEntryPointView(types);
   }
 
   @Override
@@ -39,9 +48,40 @@ abstract class MethodBindingExpression extends BindingExpression {
     addMethod();
     return Expression.create(
         methodImplementation.returnType(),
-        requestingClass.equals(generatedComponentModel.name())
+        requestingClass.equals(componentImplementation.name())
             ? CodeBlock.of("$N()", methodName())
-            : CodeBlock.of("$T.this.$N()", generatedComponentModel.name(), methodName()));
+            : CodeBlock.of("$T.this.$N()", componentImplementation.name(), methodName()));
+  }
+
+  @Override
+  final CodeBlock getModifiableBindingMethodImplementation(
+      ModifiableBindingMethod modifiableBindingMethod,
+      ComponentImplementation component,
+      DaggerTypes types) {
+    // A matching modifiable binding method means that we have previously created the binding method
+    // and we are now implementing it. If there is no matching method we need to first create the
+    // method. We create the method by deferring to getDependencyExpression (defined above) via a
+    // call to super.getModifiableBindingMethodImplementation().
+    if (supertypeModifiableBindingMethod().isPresent()) {
+      checkState(
+          supertypeModifiableBindingMethod().get().fulfillsSameRequestAs(modifiableBindingMethod));
+      return methodImplementation.body();
+    }
+    return super.getModifiableBindingMethodImplementation(
+        modifiableBindingMethod, component, types);
+  }
+
+  protected final Optional<ModifiableBindingMethod> supertypeModifiableBindingMethod() {
+    return componentImplementation.supertypeModifiableBindingMethod(request);
+  }
+
+  @Override
+  Expression getDependencyExpressionForComponentMethod(ComponentMethodDescriptor componentMethod,
+      ComponentImplementation component) {
+    return producerEntryPointView
+        .getProducerEntryPointField(this, componentMethod, component)
+        .orElseGet(
+            () -> super.getDependencyExpressionForComponentMethod(componentMethod, component));
   }
 
   /** Adds the method to the component (if necessary) the first time it's called. */

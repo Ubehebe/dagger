@@ -28,13 +28,13 @@ import com.google.common.collect.Iterators;
 import com.google.common.graph.EndpointPair;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.squareup.javapoet.ClassName;
+import dagger.model.Binding;
 import dagger.model.BindingGraph;
-import dagger.model.BindingGraph.BindingNode;
 import dagger.model.BindingGraph.ChildFactoryMethodEdge;
 import dagger.model.BindingGraph.DependencyEdge;
 import dagger.model.BindingGraph.Edge;
-import dagger.model.BindingGraph.MaybeBindingNode;
-import dagger.model.BindingGraph.MissingBindingNode;
+import dagger.model.BindingGraph.MaybeBinding;
+import dagger.model.BindingGraph.MissingBinding;
 import dagger.model.BindingGraph.Node;
 import dagger.model.BindingGraph.SubcomponentBuilderBindingEdge;
 import dagger.model.BindingKind;
@@ -58,7 +58,7 @@ import javax.tools.FileObject;
 import javax.tools.StandardLocation;
 
 /**
- * Experimental network visualizer used as a proof-of-concept for {@link BindingGraphPlugin}.
+ * Experimental visualizer used as a proof-of-concept for {@link BindingGraphPlugin}.
  *
  * <p>For each component, writes a <a href=http://www.graphviz.org/content/dot-language>DOT file</a>
  * in the same package. The file name is the name of the component type (with enclosing type names,
@@ -224,9 +224,7 @@ public final class BindingGraphVisualizer implements BindingGraphPlugin {
     DotGraph graph() {
       if (nodeIds.isEmpty()) {
         Iterator<String> colors = Iterators.cycle(COMPONENT_COLORS);
-        bindingGraph
-            .nodes()
-            .stream()
+        bindingGraph.network().nodes().stream()
             .collect(groupingBy(Node::componentPath))
             .forEach(
                 (component, networkNodes) -> {
@@ -241,7 +239,7 @@ public final class BindingGraphVisualizer implements BindingGraphPlugin {
                     subgraph.add(dotNode(node));
                   }
                 });
-        for (Edge edge : bindingGraph.edges()) {
+        for (Edge edge : bindingGraph.network().edges()) {
           dotEdge(edge).ifPresent(graph::add);
         }
       }
@@ -259,7 +257,7 @@ public final class BindingGraphVisualizer implements BindingGraphPlugin {
     }
 
     Optional<DotEdge> dotEdge(Edge edge) {
-      EndpointPair<Node> incidentNodes = bindingGraph.incidentNodes(edge);
+      EndpointPair<Node> incidentNodes = bindingGraph.network().incidentNodes(edge);
       DotEdge dotEdge = new DotEdge(nodeId(incidentNodes.source()), nodeId(incidentNodes.target()));
       if (edge instanceof DependencyEdge) {
         if (((DependencyEdge) edge).isEntryPoint()) {
@@ -280,17 +278,17 @@ public final class BindingGraphVisualizer implements BindingGraphPlugin {
 
     DotNode dotNode(Node node) {
       DotNode dotNode = new DotNode(nodeId(node));
-      if (node instanceof MaybeBindingNode) {
+      if (node instanceof MaybeBinding) {
         dotNode.addAttribute("tooltip", "");
-        if (bindingGraph.entryPointBindingNodes().contains(node)) {
+        if (bindingGraph.entryPointBindings().contains(node)) {
           dotNode.addAttribute("penwidth", 3);
         }
-        if (node instanceof BindingNode) {
-          dotNode.addAttribute("label", label((BindingNode) node));
+        if (node instanceof Binding) {
+          dotNode.addAttribute("label", label((Binding) node));
         }
-        if (node instanceof MissingBindingNode) {
+        if (node instanceof MissingBinding) {
           dotNode.addAttributeFormat(
-              "label", "missing binding for %s", ((MissingBindingNode) node).key());
+              "label", "missing binding for %s", ((MissingBinding) node).key());
         }
       } else {
         dotNode.addAttribute("style", "invis").addAttribute("shape", "point");
@@ -298,13 +296,13 @@ public final class BindingGraphVisualizer implements BindingGraphPlugin {
       return dotNode;
     }
 
-    private String label(BindingNode bindingNode) {
-      if (bindingNode.binding().kind().equals(BindingKind.MEMBERS_INJECTION)) {
-        return String.format("inject(%s)", bindingNode.key());
-      } else if (bindingNode.binding().isProduction()) {
-        return String.format("@Produces %s", bindingNode.key());
+    private String label(Binding binding) {
+      if (binding.kind().equals(BindingKind.MEMBERS_INJECTION)) {
+        return String.format("inject(%s)", binding.key());
+      } else if (binding.isProduction()) {
+        return String.format("@Produces %s", binding.key());
       } else {
-        return bindingNode.key().toString();
+        return binding.key().toString();
       }
     }
 

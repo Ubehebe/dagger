@@ -23,7 +23,6 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static dagger.internal.codegen.Binding.hasNonDefaultTypeParameters;
-import static dagger.internal.codegen.ComponentDescriptor.Kind.PRODUCTION_COMPONENT;
 import static dagger.internal.codegen.ComponentDescriptor.isComponentProductionMethod;
 import static dagger.internal.codegen.ConfigurationAnnotations.getNullableType;
 import static dagger.internal.codegen.ContributionBinding.bindingKindForMultibindingKey;
@@ -44,8 +43,6 @@ import static dagger.model.BindingKind.MEMBERS_INJECTOR;
 import static dagger.model.BindingKind.OPTIONAL;
 import static dagger.model.BindingKind.PRODUCTION;
 import static dagger.model.BindingKind.PROVISION;
-import static dagger.model.BindingKind.RELEASABLE_REFERENCE_MANAGER;
-import static dagger.model.BindingKind.RELEASABLE_REFERENCE_MANAGERS;
 import static dagger.model.BindingKind.SUBCOMPONENT_BUILDER;
 import static javax.lang.model.element.ElementKind.CONSTRUCTOR;
 import static javax.lang.model.element.ElementKind.METHOD;
@@ -60,13 +57,11 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.SetMultimap;
 import dagger.Module;
-import dagger.internal.codegen.ComponentDescriptor.BuilderRequirementMethod;
 import dagger.internal.codegen.MembersInjectionBinding.InjectionSite;
 import dagger.internal.codegen.ProductionBinding.ProductionKind;
 import dagger.model.DependencyRequest;
 import dagger.model.Key;
 import dagger.model.RequestKind;
-import dagger.model.Scope;
 import dagger.producers.Produced;
 import dagger.producers.Producer;
 import java.util.ArrayList;
@@ -303,7 +298,7 @@ final class BindingFactory {
     checkArgument(dependencyMethod.getKind().equals(METHOD));
     checkArgument(dependencyMethod.getParameters().isEmpty());
     ContributionBinding.Builder<?, ?> builder;
-    if (componentDescriptor.kind().equals(PRODUCTION_COMPONENT)
+    if (componentDescriptor.kind().isProducer()
         && isComponentProductionMethod(elements, dependencyMethod)) {
       builder =
           ProductionBinding.builder()
@@ -328,14 +323,15 @@ final class BindingFactory {
    * Returns a {@link dagger.model.BindingKind#BOUND_INSTANCE} binding for a
    * {@code @BindsInstance}-annotated builder method.
    */
-  ProvisionBinding boundInstanceBinding(BuilderRequirementMethod bindsInstanceMethod) {
-    checkArgument(bindsInstanceMethod.method().getKind().equals(METHOD));
-    checkArgument(bindsInstanceMethod.method().getParameters().size() == 1);
+  ProvisionBinding boundInstanceBinding(
+      ComponentRequirement requirement, ExecutableElement method) {
+    checkArgument(method.getKind().equals(METHOD));
+    checkArgument(method.getParameters().size() == 1);
     return ProvisionBinding.builder()
         .contributionType(ContributionType.UNIQUE)
-        .bindingElement(bindsInstanceMethod.method())
-        .key(bindsInstanceMethod.requirement().key().get())
-        .nullableType(getNullableType(getOnlyElement(bindsInstanceMethod.method().getParameters())))
+        .bindingElement(method)
+        .key(requirement.key().get())
+        .nullableType(getNullableType(getOnlyElement(method.getParameters())))
         .kind(BOUND_INSTANCE)
         .build();
   }
@@ -343,21 +339,21 @@ final class BindingFactory {
   /**
    * Returns a {@link dagger.model.BindingKind#SUBCOMPONENT_BUILDER} binding declared by a component
    * method that returns a subcomponent builder. Use {{@link
-   * #subcomponentBuilderBinding(ImmutableSet)}} for bindings declared using {@link
+   * #subcomponentCreatorBinding(ImmutableSet)}} for bindings declared using {@link
    * Module#subcomponents()}.
    *
    * @param component the component that declares or inherits the method
    */
-  ProvisionBinding subcomponentBuilderBinding(
-      ExecutableElement subcomponentBuilderMethod, TypeElement component) {
-    checkArgument(subcomponentBuilderMethod.getKind().equals(METHOD));
-    checkArgument(subcomponentBuilderMethod.getParameters().isEmpty());
+  ProvisionBinding subcomponentCreatorBinding(
+      ExecutableElement subcomponentCreatorMethod, TypeElement component) {
+    checkArgument(subcomponentCreatorMethod.getKind().equals(METHOD));
+    checkArgument(subcomponentCreatorMethod.getParameters().isEmpty());
     Key key =
-        keyFactory.forSubcomponentBuilderMethod(
-            subcomponentBuilderMethod, asDeclared(component.asType()));
+        keyFactory.forSubcomponentCreatorMethod(
+            subcomponentCreatorMethod, asDeclared(component.asType()));
     return ProvisionBinding.builder()
         .contributionType(ContributionType.UNIQUE)
-        .bindingElement(subcomponentBuilderMethod)
+        .bindingElement(subcomponentCreatorMethod)
         .key(key)
         .kind(SUBCOMPONENT_BUILDER)
         .build();
@@ -367,7 +363,7 @@ final class BindingFactory {
    * Returns a {@link dagger.model.BindingKind#SUBCOMPONENT_BUILDER} binding declared using {@link
    * Module#subcomponents()}.
    */
-  ProvisionBinding subcomponentBuilderBinding(
+  ProvisionBinding subcomponentCreatorBinding(
       ImmutableSet<SubcomponentDeclaration> subcomponentDeclarations) {
     SubcomponentDeclaration subcomponentDeclaration = subcomponentDeclarations.iterator().next();
     return ProvisionBinding.builder()
@@ -428,52 +424,6 @@ final class BindingFactory {
         .dependencies(delegateDeclaration.delegateRequest())
         .wrappedMapKeyAnnotation(delegateDeclaration.wrappedMapKey())
         .kind(DELEGATE)
-        .build();
-  }
-
-  /**
-   * Returns a {@link dagger.model.BindingKind#RELEASABLE_REFERENCE_MANAGER} binding for a {@code
-   * ReleasableReferenceManager}.
-   */
-  ProvisionBinding releasableReferenceManagerBinding(Scope scope) {
-    return ProvisionBinding.builder()
-        .contributionType(ContributionType.UNIQUE)
-        .key(keyFactory.forReleasableReferenceManager(scope))
-        .kind(RELEASABLE_REFERENCE_MANAGER)
-        .build();
-  }
-
-  /**
-   * Returns a {@link dagger.model.BindingKind#RELEASABLE_REFERENCE_MANAGER} binding for a {@code
-   * TypedReleasableReferenceManager<M>}.
-   */
-  ProvisionBinding typedReleasableReferenceManagerBinding(Scope scope, DeclaredType metadataType) {
-    return releasableReferenceManagerBinding(scope)
-        .toBuilder()
-        .key(keyFactory.forTypedReleasableReferenceManager(scope, metadataType))
-        .build();
-  }
-
-  /**
-   * Returns a {@link dagger.model.BindingKind#RELEASABLE_REFERENCE_MANAGERS} binding for a set of
-   * {@code ReleasableReferenceManager}s.
-   */
-  ProvisionBinding setOfReleasableReferenceManagersBinding() {
-    return ProvisionBinding.builder()
-        .contributionType(ContributionType.UNIQUE)
-        .key(keyFactory.forSetOfReleasableReferenceManagers())
-        .kind(RELEASABLE_REFERENCE_MANAGERS)
-        .build();
-  }
-
-  /**
-   * Returns a {@link dagger.model.BindingKind#RELEASABLE_REFERENCE_MANAGERS} binding for a set of
-   * {@code TypedReleasableReferenceManager<M>}s.
-   */
-  ProvisionBinding setOfTypedReleasableReferenceManagersBinding(DeclaredType metadataType) {
-    return setOfReleasableReferenceManagersBinding()
-        .toBuilder()
-        .key(keyFactory.forSetOfTypedReleasableReferenceManagers(metadataType))
         .build();
   }
 

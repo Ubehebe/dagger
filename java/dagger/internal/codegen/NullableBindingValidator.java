@@ -18,11 +18,12 @@ package dagger.internal.codegen;
 
 import static dagger.internal.codegen.DaggerStreams.instancesOf;
 import static dagger.internal.codegen.DaggerStreams.toImmutableList;
+import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import dagger.model.BindingGraph;
-import dagger.model.BindingGraph.BindingNode;
 import dagger.model.BindingGraph.DependencyEdge;
 import dagger.spi.BindingGraphPlugin;
 import dagger.spi.DiagnosticReporter;
@@ -43,14 +44,14 @@ final class NullableBindingValidator implements BindingGraphPlugin {
 
   @Override
   public void visitGraph(BindingGraph bindingGraph, DiagnosticReporter diagnosticReporter) {
-    for (BindingNode bindingNode : nullableBindings(bindingGraph)) {
-      for (DependencyEdge dependencyEdge : nonNullableDependencies(bindingGraph, bindingNode)) {
+    for (dagger.model.Binding binding : nullableBindings(bindingGraph)) {
+      for (DependencyEdge dependencyEdge : nonNullableDependencies(bindingGraph, binding)) {
         diagnosticReporter.reportDependency(
             compilerOptions.nullableValidationKind(),
             dependencyEdge,
             nullableToNonNullable(
-                bindingNode.key().toString(),
-                bindingNode.toString())); // will include the @Nullable
+                binding.key().toString(),
+                binding.toString())); // binding.toString() will include the @Nullable
       }
     }
   }
@@ -60,18 +61,18 @@ final class NullableBindingValidator implements BindingGraphPlugin {
     return "Dagger/Nullable";
   }
 
-  private ImmutableList<BindingNode> nullableBindings(BindingGraph bindingGraph) {
-    return bindingGraph.bindingNodes().stream()
-        .filter(bindingNode -> bindingNode.binding().isNullable())
+  private ImmutableList<dagger.model.Binding> nullableBindings(BindingGraph bindingGraph) {
+    return bindingGraph.bindings().stream()
+        .filter(binding -> binding.isNullable())
         .collect(toImmutableList());
   }
 
-  private ImmutableList<DependencyEdge> nonNullableDependencies(
-      BindingGraph bindingGraph, BindingNode bindingNode) {
-    return bindingGraph.inEdges(bindingNode).stream()
+  private ImmutableSet<DependencyEdge> nonNullableDependencies(
+      BindingGraph bindingGraph, dagger.model.Binding binding) {
+    return bindingGraph.network().inEdges(binding).stream()
         .flatMap(instancesOf(DependencyEdge.class))
         .filter(edge -> !edge.dependencyRequest().isNullable())
-        .collect(toImmutableList());
+        .collect(toImmutableSet());
   }
 
   @VisibleForTesting

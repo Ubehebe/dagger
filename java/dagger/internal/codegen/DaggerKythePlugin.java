@@ -19,6 +19,9 @@
 // the regular kythe/java tree.
 package dagger.internal.codegen;
 
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
+import static dagger.internal.codegen.DaggerElements.isAnyAnnotationPresent;
+
 import com.google.auto.service.AutoService;
 import com.google.common.collect.Iterables;
 import com.google.devtools.kythe.analyzers.base.EntrySet;
@@ -27,8 +30,6 @@ import com.google.devtools.kythe.analyzers.base.KytheEntrySets;
 import com.google.devtools.kythe.analyzers.java.Plugin;
 import com.google.devtools.kythe.proto.Storage.VName;
 import com.sun.tools.javac.code.Symbol;
-import com.sun.tools.javac.model.JavacElements;
-import com.sun.tools.javac.model.JavacTypes;
 import com.sun.tools.javac.tree.JCTree.JCClassDecl;
 import com.sun.tools.javac.tree.JCTree.JCCompilationUnit;
 import com.sun.tools.javac.util.Context;
@@ -36,15 +37,12 @@ import dagger.BindsInstance;
 import dagger.Component;
 import dagger.model.DependencyRequest;
 import dagger.model.Key;
-import java.util.ArrayList;
-import java.util.List;
+import dagger.producers.ProductionComponent;
 import java.util.Optional;
 import java.util.logging.Logger;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.lang.model.element.Element;
-import javax.lang.model.util.Elements;
-import javax.lang.model.util.Types;
 
 /**
  * A plugin which emits nodes and edges for <a href="https://github.com/google/dagger">Dagger</a>
@@ -52,20 +50,31 @@ import javax.lang.model.util.Types;
  */
 @AutoService(Plugin.class)
 public class DaggerKythePlugin extends Plugin.Scanner<Void, Void> {
+  // TODO(ronshapiro): use flogger
   private static final Logger logger = Logger.getLogger(DaggerKythePlugin.class.getCanonicalName());
   private FactEmitter emitter;
-  @Inject KytheBindingGraphFactory bindingGraphFactory;
+  @Inject ComponentDescriptor.Factory componentDescriptorFactory;
+  @Inject BindingGraphFactory bindingGraphFactory;
 
   @Override
   public Void visitClassDef(JCClassDecl tree, Void p) {
-    Optional.ofNullable(tree.sym)
-        .flatMap(bindingGraphFactory::create)
-        .ifPresent(this::addNodesForGraph);
-
+    if (tree.sym != null
+        && isAnyAnnotationPresent(tree.sym, Component.class, ProductionComponent.class)) {
+      addNodesForGraph(
+          bindingGraphFactory.create(componentDescriptorFactory.forTypeElement(tree.sym)));
+    }
     return super.visitClassDef(tree, p);
   }
 
   private void addNodesForGraph(BindingGraph graph) {
+    addDependencyEdges(graph);
+    addModuleEdges(graph);
+    addChildComponentEdges(graph);
+
+    graph.subgraphs().forEach(this::addNodesForGraph);
+  }
+
+  private void addDependencyEdges(BindingGraph graph) {
     for (ResolvedBindings resolvedBinding : graph.resolvedBindings()) {
       for (Binding binding : resolvedBinding.bindings()) {
         for (DependencyRequest dependency : binding.explicitDependencies()) {
@@ -80,8 +89,6 @@ public class DaggerKythePlugin extends Plugin.Scanner<Void, Void> {
           .dependencyRequest()
           .ifPresent(request -> addEdgesForDependencyRequest(request, request.key(), graph));
     }
-
-    graph.subgraphs().forEach(this::addNodesForGraph);
   }
 
   /**
@@ -98,7 +105,7 @@ public class DaggerKythePlugin extends Plugin.Scanner<Void, Void> {
     if (!dependency.requestElement().isPresent()) {
       return;
     }
-    BindingRequest request = BindingRequest.forDependencyRequest(targetKey, dependency.kind());
+    BindingRequest request = bindingRequest(targetKey, dependency.kind());
     ResolvedBindings resolvedBindings = graph.resolvedBindings(request);
     for (Binding binding : resolvedBindings.bindings()) {
       if (binding.bindingElement().isPresent()) {
@@ -121,42 +128,49 @@ public class DaggerKythePlugin extends Plugin.Scanner<Void, Void> {
       DependencyRequest dependency, BindingDeclaration bindingDeclaration) {
     Element requestElement = dependency.requestElement().get();
     Element bindingElement = bindingDeclaration.bindingElement().get();
-    Optional<VName> requestElementNode = jvmNode(requestElement);
-    Optional<VName> bindingElementNode = jvmNode(bindingElement);
-    if (requestElementNode.isPresent() && bindingElementNode.isPresent()) {
-      new EntrySet.Builder(
-              requestElementNode.get(), "/inject/satisfiedby", bindingElementNode.get())
-          .build()
-          .emit(emitter);
-      // TODO(ronshapiro): emit facts about the component that satisfies the edge
-    } else {
-      List<String> missingNodes = new ArrayList<>();
-      if (!requestElementNode.isPresent()) {
-        missingNodes.add("requestElement: " + requestElement);
-      }
-      if (!bindingElementNode.isPresent()) {
-        missingNodes.add("bindingElement: " + bindingElement);
-      }
+    Optional<VName> requestElementNode = jvmNode(requestElement, "request element");
+    Optional<VName> bindingElementNode = jvmNode(bindingElement, "binding element");
+    emitEdge(requestElementNode, "/inject/satisfiedby", bindingElementNode);
+    // TODO(ronshapiro): emit facts about the component that satisfies the edge
+  }
 
-      // TODO(ronshapiro): use Flogger
-      logger.warning(String.format("Missing JVM nodes: %s ", missingNodes));
+  private void addModuleEdges(BindingGraph graph) {
+    Optional<VName> componentNode = jvmNode(graph.componentTypeElement(), "component");
+    for (ModuleDescriptor module : graph.componentDescriptor().modules()) {
+      Optional<VName> moduleNode = jvmNode(module.moduleElement(), "module");
+      emitEdge(componentNode, "/inject/installsmodule", moduleNode);
     }
   }
 
-  private Optional<VName> jvmNode(Element element) {
-    return kytheGraph.getJvmNode((Symbol) element).map(KytheNode::getVName);
+  private void addChildComponentEdges(BindingGraph graph) {
+    Optional<VName> componentNode = jvmNode(graph.componentTypeElement(), "component");
+    for (BindingGraph subgraph : graph.subgraphs()) {
+      Optional<VName> subcomponentNode =
+          jvmNode(subgraph.componentTypeElement(), "child component");
+      emitEdge(componentNode, "/inject/childcomponent", subcomponentNode);
+    }
+  }
+
+  private Optional<VName> jvmNode(Element element, String name) {
+    Optional<VName> jvmNode = kytheGraph.getJvmNode((Symbol) element).map(KytheNode::getVName);
+    if (!jvmNode.isPresent()) {
+      logger.warning(String.format("Missing JVM node for %s: %s", name, element));
+    }
+    return jvmNode;
+  }
+
+  private void emitEdge(Optional<VName> source, String edgeName, Optional<VName> target) {
+    source.ifPresent(
+        s -> target.ifPresent(t -> new EntrySet.Builder(s, edgeName, t).build().emit(emitter)));
   }
 
   @Override
   public void run(
       JCCompilationUnit compilationUnit, KytheEntrySets entrySets, KytheGraph kytheGraph) {
     if (bindingGraphFactory == null) {
-      Context javaContext = kytheGraph.getJavaContext();
       emitter = entrySets.getEmitter();
       DaggerDaggerKythePlugin_PluginComponent.builder()
-          .types(JavacTypes.instance(javaContext))
-          .elements(JavacElements.instance(javaContext))
-          .compilerOptions(KytheBindingGraphFactory.createCompilerOptions())
+          .context(kytheGraph.getJavaContext())
           .build()
           .inject(this);
     }
@@ -164,20 +178,14 @@ public class DaggerKythePlugin extends Plugin.Scanner<Void, Void> {
   }
 
   @Singleton
-  @Component
+  @Component(modules = JavacPluginModule.class)
   interface PluginComponent {
     void inject(DaggerKythePlugin plugin);
 
     @Component.Builder
     interface Builder {
       @BindsInstance
-      Builder types(Types types);
-
-      @BindsInstance
-      Builder elements(Elements elements);
-
-      @BindsInstance
-      Builder compilerOptions(CompilerOptions compilerOptions);
+      Builder context(Context context);
 
       PluginComponent build();
     }

@@ -16,7 +16,8 @@
 
 package dagger.internal.codegen;
 
-import static dagger.internal.codegen.GeneratedComponentModel.FieldSpecKind.PRIVATE_METHOD_SCOPED_FIELD;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static dagger.internal.codegen.ComponentImplementation.FieldSpecKind.PRIVATE_METHOD_SCOPED_FIELD;
 import static javax.lang.model.element.Modifier.PRIVATE;
 import static javax.lang.model.element.Modifier.VOLATILE;
 
@@ -35,27 +36,27 @@ import java.util.Optional;
  */
 final class SingleCheckedMethodImplementation extends BindingMethodImplementation {
 
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
   private final ResolvedBindings resolvedBindings;
   private final ContributionBinding binding;
   private final BindingRequest request;
   private final Supplier<FieldSpec> field = Suppliers.memoize(this::createField);
 
   SingleCheckedMethodImplementation(
+      ComponentImplementation component,
       ResolvedBindings resolvedBindings,
       BindingRequest request,
       BindingExpression bindingExpression,
-      DaggerTypes types,
-      GeneratedComponentModel generatedComponentModel) {
-    super(resolvedBindings, request, bindingExpression, generatedComponentModel.name(), types);
-    this.generatedComponentModel = generatedComponentModel;
+      DaggerTypes types) {
+    super(component, resolvedBindings.contributionBinding(), request, bindingExpression, types);
+    this.componentImplementation = checkNotNull(component);
     this.resolvedBindings = resolvedBindings;
     this.binding = resolvedBindings.contributionBinding();
-    this.request = request;
+    this.request = checkNotNull(request);
   }
 
   @Override
-  CodeBlock body() {
+  CodeBlock implementation(Supplier<CodeBlock> simpleBindingExpression) {
     String fieldExpression = field.get().name.equals("local") ? "this.local" : field.get().name;
 
     CodeBlock.Builder builder = CodeBlock.builder()
@@ -68,7 +69,7 @@ final class SingleCheckedMethodImplementation extends BindingMethodImplementatio
     }
 
     return builder
-        .addStatement("local = $L", simpleBindingExpression())
+        .addStatement("local = $L", simpleBindingExpression.get())
         .addStatement("$N = ($T) local", fieldExpression, returnType())
         .endControlFlow()
         .addStatement("return ($T) local", returnType())
@@ -77,7 +78,7 @@ final class SingleCheckedMethodImplementation extends BindingMethodImplementatio
 
   private FieldSpec createField() {
     String name =
-        generatedComponentModel.getUniqueFieldName(
+        componentImplementation.getUniqueFieldName(
             request.isRequestKind(RequestKind.INSTANCE)
                 ? BindingVariableNamer.name(binding)
                 : FrameworkField.forResolvedBindings(resolvedBindings, Optional.empty()).name());
@@ -88,7 +89,7 @@ final class SingleCheckedMethodImplementation extends BindingMethodImplementatio
     }
 
     FieldSpec field = builder.build();
-    generatedComponentModel.addField(PRIVATE_METHOD_SCOPED_FIELD, field);
+    componentImplementation.addField(PRIVATE_METHOD_SCOPED_FIELD, field);
     return field;
   }
 

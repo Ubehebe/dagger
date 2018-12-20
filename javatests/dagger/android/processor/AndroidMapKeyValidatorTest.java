@@ -50,14 +50,6 @@ public class AndroidMapKeyValidatorTest {
           "import android.app.Activity;",
           "",
           "public class BarActivity extends Activity {}");
-  private static final JavaFileObject BAZ_FRAGMENT =
-      JavaFileObjects.forSourceLines(
-          "test.BazFragment",
-          "package test;",
-          "",
-          "import android.app.Fragment;",
-          "",
-          "public class BazFragment extends Fragment {}");
 
   private static JavaFileObject moduleWithMethod(String... lines) {
     return JavaFileObjects.forSourceLines(
@@ -69,7 +61,7 @@ public class AndroidMapKeyValidatorTest {
         "import dagger.Module;",
         "import dagger.*;",
         "import dagger.android.*;",
-        "import dagger.multibindings.IntoMap;",
+        "import dagger.multibindings.*;",
         "import javax.inject.*;",
         "",
         "@Module",
@@ -87,15 +79,14 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@ClassKey(FooActivity.class)",
             "abstract AndroidInjector.Factory bindRawFactory(FooActivity.Factory factory);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation)
         .hadErrorContaining(
-            "@dagger.android.ActivityKey methods should bind "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Activity>, not "
-                + "dagger.android.AndroidInjector.Factory");
+            "should bind dagger.android.AndroidInjector.Factory<?>, "
+                + "not dagger.android.AndroidInjector.Factory");
   }
 
   @Test
@@ -104,15 +95,14 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@ClassKey(FooActivity.class)",
             "abstract AndroidInjector.Builder bindRawBuilder(FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation)
         .hadErrorContaining(
-            "@dagger.android.ActivityKey methods should bind "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Activity>, not "
-                + "dagger.android.AndroidInjector.Builder");
+            "should bind dagger.android.AndroidInjector.Factory<?>, "
+                + "not dagger.android.AndroidInjector.Builder");
   }
 
   @Test
@@ -121,16 +111,15 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
-            "abstract AndroidInjector.Builder<? extends Activity> bindBuilder(",
+            "@ClassKey(FooActivity.class)",
+            "abstract AndroidInjector.Builder<?> bindBuilder(",
             "    FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation)
         .hadErrorContaining(
-            "@dagger.android.ActivityKey methods should bind "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Activity>, not "
-                + "dagger.android.AndroidInjector.Builder<? extends android.app.Activity>");
+            "should bind dagger.android.AndroidInjector.Factory<?>, not "
+                + "dagger.android.AndroidInjector.Builder<?>");
   }
 
   @Test
@@ -139,100 +128,16 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Provides",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
-            "static AndroidInjector.Builder<? extends Activity> bindBuilder(",
-            "    FooActivity.Builder builder) {",
+            "@ClassKey(FooActivity.class)",
+            "static AndroidInjector.Builder<?> bindBuilder(FooActivity.Builder builder) {",
             "  return builder;",
             "}");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation)
         .hadErrorContaining(
-            "@dagger.android.ActivityKey methods should bind "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Activity>, not "
-                + "dagger.android.AndroidInjector.Builder<? extends android.app.Activity>");
-  }
-
-  @Test
-  public void mapKeyDoesntMatchCoreType() {
-    JavaFileObject module =
-        moduleWithMethod(
-            "@Binds",
-            "@IntoMap",
-            "@FragmentKey(BazFragment.class)",
-            "abstract AndroidInjector.Factory<? extends Activity> bindWrongFrameworkType(",
-            "    FooActivity.Builder builder);");
-    Compilation compilation = compile(module, FOO_ACTIVITY, BAZ_FRAGMENT);
-    assertThat(compilation).failed();
-    assertThat(compilation)
-        .hadErrorContaining(
-            "@dagger.android.FragmentKey methods should bind "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Fragment>, not "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Activity>");
-    assertThat(compilation)
-        .hadErrorContaining(
-            "test.FooActivity.Builder does not implement AndroidInjector<test.BazFragment>")
-        .inFile(module)
-        .onLine(LINES_BEFORE_METHOD + 3);
-  }
-
-  @Test
-  public void mapKeyDoesntMatchCoreType_AndroidInjectionKey() {
-    JavaFileObject module =
-        moduleWithMethod(
-            "@Binds",
-            "@IntoMap",
-            "@AndroidInjectionKey(\"test.BazFragment\")",
-            "abstract AndroidInjector.Factory<? extends Activity> bindWrongFrameworkType(",
-            "    FooActivity.Builder builder);");
-    Compilation compilation = compile(module, FOO_ACTIVITY, BAZ_FRAGMENT);
-    assertThat(compilation).failed();
-    assertThat(compilation)
-        .hadErrorContaining(
-            "bindWrongFrameworkType(test.FooActivity.Builder) should bind "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Fragment>, not "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Activity>");
-    assertThat(compilation)
-        .hadErrorContaining(
-            "test.FooActivity.Builder does not implement AndroidInjector<test.BazFragment>")
-        .inFile(module)
-        .onLine(LINES_BEFORE_METHOD + 3);
-  }
-
-  @Test
-  public void mapKeyDoesntMatchCoreType_supportFragments() {
-    JavaFileObject supportFragment =
-        JavaFileObjects.forSourceLines(
-            "test.SupportFragment",
-            "package test;",
-            "",
-            "import android.support.v4.app.Fragment;",
-            "import dagger.android.AndroidInjector;",
-            "",
-            "public class SupportFragment extends Fragment {",
-            "  interface Factory extends AndroidInjector.Factory<SupportFragment> {}",
-            "}");
-
-    JavaFileObject module =
-        moduleWithMethod(
-            "@Binds",
-            "@IntoMap",
-            "@dagger.android.FragmentKey(BazFragment.class)",
-            "abstract AndroidInjector.Factory<? extends android.support.v4.app.Fragment> ",
-            "    bindWrongFrameworkType(SupportFragment.Factory factory);");
-    Compilation compilation = compile(module, BAZ_FRAGMENT, supportFragment);
-    assertThat(compilation).failed();
-    assertThat(compilation)
-        .hadErrorContaining(
-            "@dagger.android.FragmentKey methods should bind "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Fragment>, not "
-                + "dagger.android.AndroidInjector.Factory<? extends "
-                + "android.support.v4.app.Fragment>");
-    assertThat(compilation)
-        .hadErrorContaining(
-            "test.SupportFragment.Factory does not implement AndroidInjector<test.BazFragment>")
-        .inFile(module)
-        .onLine(LINES_BEFORE_METHOD + 3);
+            "should bind dagger.android.AndroidInjector.Factory<?>, not "
+                + "dagger.android.AndroidInjector.Builder<?>");
   }
 
   @Test
@@ -241,15 +146,14 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@ClassKey(FooActivity.class)",
             "abstract AndroidInjector.Builder<FooActivity> bindBuilder(",
             "    FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation)
         .hadErrorContaining(
-            "@dagger.android.ActivityKey methods should bind "
-                + "dagger.android.AndroidInjector.Factory<? extends android.app.Activity>, not "
+            "should bind dagger.android.AndroidInjector.Factory<?>, not "
                 + "dagger.android.AndroidInjector.Builder<test.FooActivity>");
   }
 
@@ -259,7 +163,7 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@ClassKey(FooActivity.class)",
             "abstract AndroidInjector.Builder<Activity> bindBuilder(",
             "    FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
@@ -274,9 +178,8 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
-            "abstract AndroidInjector.Factory<? extends Activity> bindCorrectType(",
-            "    FooActivity.Builder builder);");
+            "@ClassKey(FooActivity.class)",
+            "abstract AndroidInjector.Factory<?> bindCorrectType(FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).succeededWithoutWarnings();
   }
@@ -288,8 +191,19 @@ public class AndroidMapKeyValidatorTest {
             "@Binds",
             "@IntoMap",
             "@AndroidInjectionKey(\"test.FooActivity\")",
-            "abstract AndroidInjector.Factory<? extends Activity> bindCorrectType(",
-            "    FooActivity.Builder builder);");
+            "abstract AndroidInjector.Factory<?> bindCorrectType(FooActivity.Builder builder);");
+    Compilation compilation = compile(module, FOO_ACTIVITY);
+    assertThat(compilation).succeededWithoutWarnings();
+  }
+
+  @Test
+  public void bindsCorrectType_AndroidInjectionKey_unbounded() {
+    JavaFileObject module =
+        moduleWithMethod(
+            "@Binds",
+            "@IntoMap",
+            "@AndroidInjectionKey(\"test.FooActivity\")",
+            "abstract AndroidInjector.Factory<?> bindCorrectType(FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).succeededWithoutWarnings();
   }
@@ -300,10 +214,9 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@ClassKey(FooActivity.class)",
             "@Singleton",
-            "abstract AndroidInjector.Factory<? extends Activity> bindWithScope(",
-            "    FooActivity.Builder builder);");
+            "abstract AndroidInjector.Factory<?> bindWithScope(FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation).hadErrorContaining("should not be scoped");
@@ -316,10 +229,9 @@ public class AndroidMapKeyValidatorTest {
             "@SuppressWarnings(\"dagger.android.ScopedInjectorFactory\")",
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@ClassKey(FooActivity.class)",
             "@Singleton",
-            "abstract AndroidInjector.Factory<? extends Activity> bindWithScope(",
-            "    FooActivity.Builder builder);");
+            "abstract AndroidInjector.Factory<?> bindWithScope(FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).succeededWithoutWarnings();
   }
@@ -330,9 +242,8 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(BarActivity.class)",
-            "abstract AndroidInjector.Factory<?> mismatchedFactory(",
-            "    FooActivity.Factory factory);");
+            "@ClassKey(BarActivity.class)",
+            "abstract AndroidInjector.Factory<?> mismatchedFactory(FooActivity.Factory factory);");
     Compilation compilation = compile(module, FOO_ACTIVITY, BAR_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation)
@@ -348,9 +259,8 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(BarActivity.class)",
-            "abstract AndroidInjector.Factory<? extends Activity> mismatchedBuilder(",
-            "    FooActivity.Builder builder);");
+            "@ClassKey(BarActivity.class)",
+            "abstract AndroidInjector.Factory<?> mismatchedBuilder(FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY, BAR_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation)
@@ -367,8 +277,7 @@ public class AndroidMapKeyValidatorTest {
             "@Binds",
             "@IntoMap",
             "@AndroidInjectionKey(\"test.BarActivity\")",
-            "abstract AndroidInjector.Factory<? extends Activity> mismatchedBuilder(",
-            "    FooActivity.Builder builder);");
+            "abstract AndroidInjector.Factory<?> mismatchedBuilder(FooActivity.Builder builder);");
     Compilation compilation = compile(module, FOO_ACTIVITY, BAR_ACTIVITY);
     assertThat(compilation).failed();
     assertThat(compilation)
@@ -384,9 +293,8 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Provides",
             "@IntoMap",
-            "@ActivityKey(BarActivity.class)",
-            "static AndroidInjector.Factory<? extends Activity> mismatchedBuilder(",
-            "    FooActivity.Builder builder) {",
+            "@ClassKey(BarActivity.class)",
+            "static AndroidInjector.Factory<?> mismatchedBuilder(FooActivity.Builder builder) {",
             "  return builder;",
             "}");
     Compilation compilation = compile(module, FOO_ACTIVITY, BAR_ACTIVITY);
@@ -399,7 +307,7 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@ClassKey(FooActivity.class)",
             "@Named(\"unused\")",
             // normally this should fail, since it is binding to a Builder not a Factory
             "abstract AndroidInjector.Builder<?> bindsBuilderWithQualifier(",
@@ -414,7 +322,7 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@AndroidInjectionKey(\"test.FooActivity\")",
             "abstract int bindInt(@Named(\"unused\") int otherInt);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).succeededWithoutWarnings();
@@ -426,7 +334,7 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@AndroidInjectionKey(\"test.FooActivity\")",
             "abstract Number bindInt(Integer integer);");
     Compilation compilation = compile(module, FOO_ACTIVITY);
     assertThat(compilation).succeededWithoutWarnings();
@@ -438,7 +346,7 @@ public class AndroidMapKeyValidatorTest {
         moduleWithMethod(
             "@Binds",
             "@IntoMap",
-            "@ActivityKey(FooActivity.class)",
+            "@ClassKey(FooActivity.class)",
             "abstract AndroidInjector.Factory<?> bindCorrectType(",
             "    FooActivity.Builder builder, FooActivity.Builder builder2);");
     Compilation compilation = compile(module, FOO_ACTIVITY);

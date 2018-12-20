@@ -39,10 +39,10 @@ import javax.inject.Provider;
  * methods.
  */
 public final class MapOfProducedProducer<K, V> extends AbstractProducer<Map<K, Produced<V>>> {
-  private final Map<K, Producer<V>> mapOfProducers;
+  private final Map<K, Producer<V>> contributingMap;
 
-  private MapOfProducedProducer(Map<K, Producer<V>> mapOfProducers) {
-    this.mapOfProducers = mapOfProducers;
+  private MapOfProducedProducer(Map<K, Producer<V>> contributingMap) {
+    this.contributingMap = contributingMap;
   }
 
   @Override
@@ -50,7 +50,7 @@ public final class MapOfProducedProducer<K, V> extends AbstractProducer<Map<K, P
     return Futures.transform(
         Futures.allAsList(
             Iterables.transform(
-                mapOfProducers.entrySet(), MapOfProducedProducer.<K, V>entryUnwrapper())),
+                contributingMap.entrySet(), MapOfProducedProducer.<K, V>entryUnwrapper())),
         new Function<List<Map.Entry<K, Produced<V>>>, Map<K, Produced<V>>>() {
           @Override
           public Map<K, Produced<V>> apply(List<Map.Entry<K, Produced<V>>> entries) {
@@ -90,13 +90,17 @@ public final class MapOfProducedProducer<K, V> extends AbstractProducer<Map<K, P
   }
 
   /** Returns a new {@link Builder}. */
-  public static <K, V> Builder<K, V> builder() {
-    return new Builder<>();
+  public static <K, V> Builder<K, V> builder(int size) {
+    return new Builder<>(size);
   }
 
   /** A builder for {@link MapOfProducedProducer}. */
   public static final class Builder<K, V> {
-    private final ImmutableMap.Builder<K, Producer<V>> mapBuilder = ImmutableMap.builder();
+    private final ImmutableMap.Builder<K, Producer<V>> mapBuilder;
+
+    private Builder(int size) {
+      mapBuilder = ImmutableMap.builderWithExpectedSize(size);
+    }
 
     /** Returns a new {@link MapOfProducedProducer}. */
     public MapOfProducedProducer<K, V> build() {
@@ -116,6 +120,14 @@ public final class MapOfProducedProducer<K, V> extends AbstractProducer<Map<K, P
       checkNotNull(key, "key");
       checkNotNull(providerOfValue, "provider of value");
       mapBuilder.put(key, producerFromProvider(providerOfValue));
+      return this;
+    }
+
+    // TODO(b/118630627): make this accept MapOfProducedProducer<K, V>, and change all framework
+    // fields to be of that type so we don't need an unsafe cast
+    /** Adds contributions from a super-implementation of a component into this builder. */
+    public Builder<K, V> putAll(Producer<Map<K, Produced<V>>> mapOfProducedProducer) {
+      mapBuilder.putAll(((MapOfProducedProducer<K, V>) mapOfProducedProducer).contributingMap);
       return this;
     }
   }

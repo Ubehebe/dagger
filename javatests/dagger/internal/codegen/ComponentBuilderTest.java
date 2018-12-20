@@ -44,8 +44,8 @@ public class ComponentBuilderTest {
     this.compilerMode = compilerMode;
   }
 
-  private static final ErrorMessages.ComponentBuilderMessages MSGS =
-      ErrorMessages.ComponentBuilderMessages.INSTANCE;
+  private static final ErrorMessages.ComponentCreatorMessages MSGS =
+      ErrorMessages.ComponentCreatorMessages.INSTANCE;
 
   @Test
   public void testEmptyBuilder() {
@@ -226,7 +226,8 @@ public class ComponentBuilderTest {
             "  private TestModule2 testModule2;",
             "",
             "  private DaggerTestComponent(Builder builder) {",
-            "    initialize(builder);",
+            "    this.testModule1 = builder.testModule1;",
+            "    this.testModule2 = builder.testModule2;",
             "  }",
             "",
             "  public static TestComponent.Builder builder() {",
@@ -235,12 +236,6 @@ public class ComponentBuilderTest {
             "",
             "  public static TestComponent create() {",
             "    return new Builder().build();",
-            "  }",
-            "",
-            "  @SuppressWarnings(\"unchecked\")",
-            "  private void initialize(final Builder builder) {",
-            "    this.testModule1 = builder.testModule1;",
-            "    this.testModule2 = builder.testModule2;",
             "  }",
             "",
             "  @Override",
@@ -414,16 +409,11 @@ public class ComponentBuilderTest {
             "  private Object object;",
             "",
             "  private DaggerSimpleComponent(Builder builder) {",
-            "    initialize(builder);",
+            "    this.object = builder.object;",
             "  }",
             "",
             "  public static SimpleComponent.Builder builder() {",
             "    return new Builder();",
-            "  }",
-            "",
-            "  @SuppressWarnings(\"unchecked\")",
-            "  private void initialize(final Builder builder) {",
-            "    this.object = builder.object;",
             "  }",
             "",
             "  @Override",
@@ -436,10 +426,7 @@ public class ComponentBuilderTest {
             "",
             "    @Override",
             "    public SimpleComponent build() {",
-            "      if (object == null) {",
-            "        throw new IllegalStateException(",
-            "            Object.class.getCanonicalName() + \" must be set\")",
-            "      }",
+            "      Preconditions.checkBuilderRequirement(object, Object.class);",
             "      return new DaggerSimpleComponent(this);",
             "    }",
             "",

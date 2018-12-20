@@ -30,26 +30,22 @@ import static dagger.internal.codegen.MapKeys.mapKeyType;
 import static dagger.internal.codegen.Optionals.firstPresent;
 import static dagger.internal.codegen.RequestKinds.extractKeyType;
 import static dagger.internal.codegen.RequestKinds.getRequestKind;
+import static java.util.Arrays.asList;
 import static javax.lang.model.element.ElementKind.METHOD;
 
 import com.google.auto.common.MoreTypes;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import dagger.Binds;
 import dagger.BindsOptionalOf;
 import dagger.model.Key;
 import dagger.model.Key.MultibindingContributionIdentifier;
 import dagger.model.RequestKind;
-import dagger.model.Scope;
 import dagger.multibindings.Multibinds;
 import dagger.producers.Produced;
 import dagger.producers.Producer;
 import dagger.producers.Production;
 import dagger.producers.internal.ProductionImplementation;
 import dagger.producers.monitoring.ProductionComponentMonitor;
-import dagger.releasablereferences.ForReleasableReferences;
-import dagger.releasablereferences.ReleasableReferenceManager;
-import dagger.releasablereferences.TypedReleasableReferenceManager;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -99,11 +95,6 @@ final class KeyFactory {
     return mapOf(keyType, types.getDeclaredType(frameworkType, boxPrimitives(valueType)));
   }
 
-  private DeclaredType typedReleasableReferenceManagerOf(DeclaredType metadataType) {
-    return types.getDeclaredType(
-        getClassElement(TypedReleasableReferenceManager.class), metadataType);
-  }
-
   Key forComponentMethod(ExecutableElement componentMethod) {
     checkArgument(componentMethod.getKind().equals(METHOD));
     return forMethod(componentMethod, componentMethod.getReturnType());
@@ -119,16 +110,16 @@ final class KeyFactory {
     return forMethod(componentMethod, keyType);
   }
 
-  Key forSubcomponentBuilderMethod(
-      ExecutableElement subcomponentBuilderMethod, DeclaredType declaredContainer) {
-    checkArgument(subcomponentBuilderMethod.getKind().equals(METHOD));
+  Key forSubcomponentCreatorMethod(
+      ExecutableElement subcomponentCreatorMethod, DeclaredType declaredContainer) {
+    checkArgument(subcomponentCreatorMethod.getKind().equals(METHOD));
     ExecutableType resolvedMethod =
-        asExecutable(types.asMemberOf(declaredContainer, subcomponentBuilderMethod));
+        asExecutable(types.asMemberOf(declaredContainer, subcomponentCreatorMethod));
     return Key.builder(resolvedMethod.getReturnType()).build();
   }
 
-  Key forSubcomponentBuilder(TypeMirror builderType) {
-    return Key.builder(builderType).build();
+  Key forSubcomponentCreator(TypeMirror creatorType) {
+    return Key.builder(creatorType).build();
   }
 
   Key forProvidesMethod(ExecutableElement method, TypeElement contributingModule) {
@@ -318,29 +309,26 @@ final class KeyFactory {
   }
 
   /**
-   * Keys for map contributions from {@link dagger.Provides} and {@link dagger.producers.Produces}
-   * are in the form {@code Map<K, Framework<V>>}, but keys for {@link Binds} methods are just
-   * {@code Map<K, V>} since the framework type is not known until graph resolution. This
-   * translates from the {@code @Provides}/{@code @Produces} format into the {@code @Binds}
-   * format. If {@link Key#type() possibleMapKey.type()} is not a {@code Map<K, Framework<V>>},
-   * returns {@code possibleMapKey}.
+   * If {@code key}'s type is {@code Map<K, Provider<V>>}, {@code Map<K, Producer<V>>}, or {@code
+   * Map<K, Produced<V>>}, returns a key with the same qualifier and {@link
+   * Key#multibindingContributionIdentifier()} whose type is simply {@code Map<K, V>}.
+   *
+   * <p>Otherwise, returns {@code key}.
    */
-  Key convertToDelegateKey(Key possibleMapKey) {
-    if (!MapType.isMap(possibleMapKey)) {
-      return possibleMapKey;
+  Key unwrapMapValueType(Key key) {
+    if (MapType.isMap(key)) {
+      MapType mapType = MapType.from(key);
+      if (!mapType.isRawType()) {
+        for (Class<?> frameworkClass : asList(Provider.class, Producer.class, Produced.class)) {
+          if (mapType.valuesAreTypeOf(frameworkClass)) {
+            return key.toBuilder()
+                .type(mapOf(mapType.keyType(), mapType.unwrappedValueType(frameworkClass)))
+                .build();
+          }
+        }
+      }
     }
-    MapType mapType = MapType.from(possibleMapKey);
-    TypeMirror wrappedValueType;
-    if (mapType.isRawType()) {
-      return possibleMapKey;
-    } else if (mapType.valuesAreTypeOf(Provider.class)) {
-      wrappedValueType = mapType.unwrappedValueType(Provider.class);
-    } else if (mapType.valuesAreTypeOf(Producer.class)) {
-      wrappedValueType = mapType.unwrappedValueType(Producer.class);
-    } else {
-      return possibleMapKey;
-    }
-    return possibleMapKey.toBuilder().type(mapOf(mapType.keyType(), wrappedValueType)).build();
+    return key;
   }
 
   /**
@@ -440,40 +428,5 @@ final class KeyFactory {
         key.toBuilder()
             .type(extractKeyType(getRequestKind(optionalValueType), optionalValueType))
             .build());
-  }
-
-  /** Returns a key for a {@code @ForReleasableReferences(scope) ReleasableReferenceManager}. */
-  Key forReleasableReferenceManager(Scope scope) {
-    return forQualifiedType(
-        Optional.of(forReleasableReferencesAnnotationMirror(scope)),
-        getClassElement(ReleasableReferenceManager.class).asType());
-  }
-
-  /**
-   * Returns a key for a {@code @ForReleasableReferences(scope)
-   * TypedReleasableReferenceManager<metadataType>}
-   */
-  Key forTypedReleasableReferenceManager(Scope scope, DeclaredType metadataType) {
-    return Key.builder(typedReleasableReferenceManagerOf(metadataType))
-        .qualifier(forReleasableReferencesAnnotationMirror(scope))
-        .build();
-  }
-
-  /** Returns a key for a {@code Set<ReleasableReferenceManager>}. */
-  Key forSetOfReleasableReferenceManagers() {
-    return Key.builder(setOf(getClassElement(ReleasableReferenceManager.class).asType())).build();
-  }
-
-  /** Returns a key for a {@code Set<TypedReleasableReferenceManager<metadataType>}. */
-  Key forSetOfTypedReleasableReferenceManagers(DeclaredType metadataType) {
-    return forQualifiedType(
-        Optional.empty(), setOf(typedReleasableReferenceManagerOf(metadataType)));
-  }
-
-  private AnnotationMirror forReleasableReferencesAnnotationMirror(Scope scope) {
-    return SimpleAnnotationMirror.of(
-        getClassElement(ForReleasableReferences.class),
-        ImmutableMap.of(
-            "value", new SimpleTypeAnnotationValue(scope.scopeAnnotationElement().asType())));
   }
 }

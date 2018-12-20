@@ -16,7 +16,7 @@
 
 package dagger.internal.codegen;
 
-import static com.google.common.base.Preconditions.checkState;
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
@@ -31,19 +31,19 @@ import java.util.Optional;
 /** An abstract base class for multibinding {@link BindingExpression}s. */
 abstract class MultibindingExpression extends SimpleInvocationBindingExpression {
   private final ProvisionBinding binding;
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
 
   MultibindingExpression(
-      ResolvedBindings resolvedBindings, GeneratedComponentModel generatedComponentModel) {
+      ResolvedBindings resolvedBindings, ComponentImplementation componentImplementation) {
     super(resolvedBindings);
-    this.generatedComponentModel = generatedComponentModel;
+    this.componentImplementation = componentImplementation;
     this.binding = (ProvisionBinding) resolvedBindings.contributionBinding();
   }
 
   @Override
   Expression getDependencyExpression(ClassName requestingClass) {
     Expression expression = buildDependencyExpression(requestingClass);
-    generatedComponentModel.registerImplementedMultibinding(binding);
+    componentImplementation.registerImplementedMultibinding(binding, bindingRequest());
     return expression;
   }
 
@@ -54,16 +54,15 @@ abstract class MultibindingExpression extends SimpleInvocationBindingExpression 
   protected abstract Expression buildDependencyExpression(ClassName requestingClass);
 
   /**
-   * Returns the subset of {@code dependencies} that represent multibinding
-   * contributions that were not included in a superclass implementation of this multibinding
-   * method. This is relevant only for ahead-of-time subcomponents. When not generating
-   * ahead-of-time subcomponents there is only one implementation of a multibinding expression and
-   * all {@link DependencyRequest}s from the argment are returned.
+   * Returns the subset of {@code dependencies} that represent multibinding contributions that were
+   * not included in a superclass implementation of this multibinding method. This is relevant only
+   * for ahead-of-time subcomponents. When not generating ahead-of-time subcomponents there is only
+   * one implementation of a multibinding expression and all {@link DependencyRequest}s from the
+   * argment are returned.
    */
   protected SetView<DependencyRequest> getNewContributions(
       ImmutableSet<DependencyRequest> dependencies) {
-    return Sets.difference(
-        dependencies, generatedComponentModel.superclassContributionsMade(binding.key()));
+    return Sets.difference(dependencies, superclassContributions());
   }
 
   /**
@@ -72,22 +71,23 @@ abstract class MultibindingExpression extends SimpleInvocationBindingExpression 
    * when generating ahead-of-time subcomponents.
    */
   protected Optional<CodeBlock> superMethodCall() {
-    if (generatedComponentModel.supermodel().isPresent()) {
+    if (componentImplementation.superclassImplementation().isPresent()) {
       Optional<ModifiableBindingMethod> method =
-          generatedComponentModel.getModifiableBindingMethod(
-              BindingRequest.forDependencyRequest(binding.key(), RequestKind.INSTANCE));
-      checkState(
-          method.isPresent(),
-          "Generating a multibinding super method call when no method has been registered for the "
-              + "binding. Binding is for a %s in %s",
-          binding.key(),
-          generatedComponentModel.name());
-      ImmutableSet<DependencyRequest> superclassContributions =
-          generatedComponentModel.superclassContributionsMade(binding.key());
-      if (!superclassContributions.isEmpty()) {
-        return Optional.of(CodeBlock.of("super.$L()", method.get().methodSpec().name));
+          componentImplementation.getModifiableBindingMethod(bindingRequest());
+      if (method.isPresent()) {
+        if (!superclassContributions().isEmpty()) {
+          return Optional.of(CodeBlock.of("super.$L()", method.get().methodSpec().name));
+        }
       }
     }
     return Optional.empty();
+  }
+
+  private BindingRequest bindingRequest() {
+    return BindingRequest.bindingRequest(binding.key(), RequestKind.INSTANCE);
+  }
+
+  private ImmutableSet<DependencyRequest> superclassContributions() {
+    return componentImplementation.superclassContributionsMade(bindingRequest());
   }
 }

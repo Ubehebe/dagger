@@ -23,31 +23,28 @@ import static dagger.internal.codegen.SourceFiles.mapFactoryClassName;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.squareup.javapoet.CodeBlock;
-import dagger.internal.codegen.FrameworkFieldInitializer.FrameworkInstanceCreationExpression;
 import dagger.producers.Produced;
 import dagger.producers.Producer;
 import javax.inject.Provider;
 import javax.lang.model.type.TypeMirror;
 
 /** A factory creation expression for a multibound map. */
-// TODO(dpb): Resolve with SetFactoryCreationExpression.
-final class MapFactoryCreationExpression implements FrameworkInstanceCreationExpression {
+final class MapFactoryCreationExpression extends MultibindingFactoryCreationExpression {
 
-  private final GeneratedComponentModel generatedComponentModel;
-  private final ComponentBindingExpressions componentBindingExpressions;
+  private final ComponentImplementation componentImplementation;
   private final BindingGraph graph;
   private final ContributionBinding binding;
   private final DaggerElements elements;
 
   MapFactoryCreationExpression(
       ContributionBinding binding,
-      GeneratedComponentModel generatedComponentModel,
+      ComponentImplementation componentImplementation,
       ComponentBindingExpressions componentBindingExpressions,
       BindingGraph graph,
       DaggerElements elements) {
+    super(binding, componentImplementation, componentBindingExpressions);
     this.binding = checkNotNull(binding);
-    this.generatedComponentModel = checkNotNull(generatedComponentModel);
-    this.componentBindingExpressions = checkNotNull(componentBindingExpressions);
+    this.componentImplementation = checkNotNull(componentImplementation);
     this.graph = checkNotNull(graph);
     this.elements = checkNotNull(elements);
   }
@@ -55,8 +52,7 @@ final class MapFactoryCreationExpression implements FrameworkInstanceCreationExp
   @Override
   public CodeBlock creationExpression() {
     CodeBlock.Builder builder = CodeBlock.builder().add("$T.", mapFactoryClassName(binding));
-    boolean useRawType = !generatedComponentModel.isTypeAccessible(binding.key().type());
-    if (!useRawType) {
+    if (!useRawType()) {
       MapType mapType = MapType.from(binding.key().type());
       // TODO(ronshapiro): either inline this into mapFactoryClassName, or add a
       // mapType.unwrappedValueType() method that doesn't require a framework type
@@ -72,31 +68,23 @@ final class MapFactoryCreationExpression implements FrameworkInstanceCreationExp
     }
 
     ImmutableList<FrameworkDependency> frameworkDependencies = binding.frameworkDependencies();
-    if (binding.bindingType().equals(BindingType.PROVISION)) {
-      builder.add("builder($L)", frameworkDependencies.size());
-    } else {
-      builder.add("builder()");
-    }
+    builder.add("builder($L)", frameworkDependencies.size());
 
-    for (FrameworkDependency frameworkDependency : frameworkDependencies) {
+    superContributions()
+        .ifPresent(superContributions -> builder.add(".putAll($L)", superContributions));
+
+    for (FrameworkDependency frameworkDependency : frameworkDependenciesToImplement()) {
       ContributionBinding contributionBinding =
           graph.contributionBindings().get(frameworkDependency.key()).contributionBinding();
-      CodeBlock value =
-          componentBindingExpressions
-              .getDependencyExpression(frameworkDependency, generatedComponentModel.name())
-              .codeBlock();
       builder.add(
           ".put($L, $L)",
-          getMapKeyExpression(contributionBinding, generatedComponentModel.name(), elements),
-          useRawType ? CodeBlocks.cast(value, frameworkDependency.frameworkClass()) : value);
+          getMapKeyExpression(contributionBinding, componentImplementation.name(), elements),
+          multibindingDependencyExpression(frameworkDependency));
     }
     builder.add(".build()");
 
-    return builder.build();
-  }
+    componentImplementation.registerImplementedMultibinding(binding, bindingRequest());
 
-  @Override
-  public boolean useInnerSwitchingProvider() {
-    return !binding.dependencies().isEmpty();
+    return builder.build();
   }
 }

@@ -17,24 +17,23 @@
 package dagger.internal.codegen;
 
 import static com.google.common.base.Preconditions.checkState;
-import static dagger.internal.codegen.ComponentRequirement.Kind.BOUND_INSTANCE;
 import static dagger.internal.codegen.DaggerStreams.presentValues;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
 
 import com.google.auto.value.AutoValue;
 import com.google.auto.value.extension.memoized.Memoized;
 import com.google.common.collect.FluentIterable;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Multimaps;
 import com.google.common.graph.Traverser;
 import dagger.Subcomponent;
-import dagger.internal.codegen.ComponentDescriptor.BuilderRequirementMethod;
-import dagger.model.DependencyRequest;
 import dagger.model.Key;
 import dagger.model.RequestKind;
-import dagger.model.Scope;
-import dagger.releasablereferences.CanReleaseReferences;
-import dagger.releasablereferences.ReleasableReferenceManager;
+import java.util.Collection;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.StreamSupport;
 import javax.lang.model.element.ExecutableElement;
@@ -82,53 +81,24 @@ abstract class BindingGraph {
         .build();
   }
 
-  abstract ImmutableSet<BindingGraph> subgraphs();
+  abstract ImmutableList<BindingGraph> subgraphs();
 
-  /**
-   * The scopes in the graph that {@linkplain CanReleaseReferences can release their references} for
-   * which there is a dependency request for any of the following:
-   *
-   * <ul>
-   *   <li>{@code @ForReleasableReferences(scope)} {@link ReleasableReferenceManager}
-   *   <li>{@code @ForReleasableReferences(scope)} {@code TypedReleasableReferenceManager<M>}, where
-   *       {@code M} is the releasable-references metadata type for {@code scope}
-   *   <li>{@code Set<ReleasableReferenceManager>}
-   *   <li>{@code Set<TypedReleasableReferenceManager<M>>}, where {@code M} is the metadata type for
-   *       the scope
-   * </ul>
-   *
-   * <p>This set is always empty for subcomponent graphs.
-   */
-  abstract ImmutableSet<Scope> scopesRequiringReleasableReferenceManagers();
-
-  /** Returns the resolved bindings for the dependencies of {@code binding}. */
-  ImmutableSet<ResolvedBindings> resolvedDependencies(ContributionBinding binding) {
-    return binding
-        .dependencies()
-        .stream()
-        .map(DependencyRequest::key)
-        .map(
-            key ->
-                contributionBindings()
-                    .getOrDefault(key, ResolvedBindings.noBindings(key, componentDescriptor())))
-        .collect(toImmutableSet());
-  }
   /**
    * The type that defines the component for this graph.
    *
-   * @see ComponentDescriptor#componentDefinitionType()
+   * @see ComponentDescriptor#typeElement()
    */
-  TypeElement componentType() {
-    return componentDescriptor().componentDefinitionType();
+  TypeElement componentTypeElement() {
+    return componentDescriptor().typeElement();
   }
 
   /**
    * Returns the set of modules that are owned by this graph regardless of whether or not any of
    * their bindings are used in this graph. For graphs representing top-level {@link
-   * dagger.Component components}, this set will be the same as
-   * {@linkplain ComponentDescriptor#transitiveModules the component's transitive modules}. For
-   * {@linkplain Subcomponent subcomponents}, this set will be the transitive modules that are not
-   * owned by any of their ancestors.
+   * dagger.Component components}, this set will be the same as {@linkplain
+   * ComponentDescriptor#modules() the component's transitive modules}. For {@linkplain Subcomponent
+   * subcomponents}, this set will be the transitive modules that are not owned by any of their
+   * ancestors.
    */
   abstract ImmutableSet<ModuleDescriptor> ownedModules();
 
@@ -184,10 +154,47 @@ abstract class BindingGraph {
    */
   @Memoized
   ImmutableSet<ComponentRequirement> componentRequirements() {
+    return componentRequirements(
+        StreamSupport.stream(SUBGRAPH_TRAVERSER.depthFirstPreOrder(this).spliterator(), false)
+            .flatMap(graph -> graph.contributionBindings().values().stream())
+            .flatMap(bindings -> bindings.contributionBindings().stream())
+        .collect(toImmutableSet()));
+  }
+
+  /**
+   * The types for which the component may need instances, depending on how it is resolved in a
+   * parent component.
+   *
+   * <ul>
+   *   <li>{@linkplain #ownedModules() Owned modules} with concrete instance bindings. If the module
+   *       is never used in the fully resolved binding graph, the instance will not be required
+   *       unless a component builder requests it.
+   *   <li>Bound instances (always required)
+   * </ul>
+   */
+  @Memoized
+  ImmutableSet<ComponentRequirement> possiblyNecessaryRequirements() {
+    checkState(!componentDescriptor().kind().isTopLevel());
+    return componentRequirements(
+        StreamSupport.stream(SUBGRAPH_TRAVERSER.depthFirstPreOrder(this).spliterator(), false)
+            .flatMap(graph -> graph.ownedModules().stream())
+            .flatMap(module -> module.bindings().stream())
+            .collect(toImmutableSet()));
+  }
+
+  /**
+   * The types for which the component needs instances.
+   *
+   * <ul>
+   *   <li>component dependencies
+   *   <li>The modules of {@code bindings} that require a module instance
+   *   <li>bound instances
+   * </ul>
+   */
+  private ImmutableSet<ComponentRequirement> componentRequirements(
+      ImmutableSet<ContributionBinding> bindings) {
     ImmutableSet.Builder<ComponentRequirement> requirements = ImmutableSet.builder();
-    StreamSupport.stream(SUBGRAPH_TRAVERSER.depthFirstPreOrder(this).spliterator(), false)
-        .flatMap(graph -> graph.contributionBindings().values().stream())
-        .flatMap(bindings -> bindings.contributionBindings().stream())
+    bindings.stream()
         .filter(ContributionBinding::requiresModuleInstance)
         .map(ContributionBinding::contributingModule)
         .flatMap(presentValues())
@@ -198,16 +205,11 @@ abstract class BindingGraph {
       factoryMethodParameters().keySet().forEach(requirements::add);
     }
     requirements.addAll(componentDescriptor().dependencies());
-    if (componentDescriptor().builderSpec().isPresent()) {
-      componentDescriptor()
-          .builderSpec()
-          .get()
-          .requirementMethods()
-          .stream()
-          .map(BuilderRequirementMethod::requirement)
-          .filter(req -> req.kind().equals(BOUND_INSTANCE))
-          .forEach(requirements::add);
-    }
+    componentDescriptor()
+        .creatorDescriptor()
+        .ifPresent(
+            creatorDescriptor ->
+                creatorDescriptor.boundInstanceRequirements().forEach(requirements::add));
     return requirements.build();
   }
 
@@ -229,17 +231,26 @@ abstract class BindingGraph {
       ComponentDescriptor componentDescriptor,
       ImmutableMap<Key, ResolvedBindings> resolvedContributionBindingsMap,
       ImmutableMap<Key, ResolvedBindings> resolvedMembersInjectionBindings,
-      ImmutableSet<BindingGraph> subgraphs,
-      ImmutableSet<Scope> scopesRequiringReleasableReferenceManagers,
+      ImmutableList<BindingGraph> subgraphs,
       ImmutableSet<ModuleDescriptor> ownedModules,
       Optional<ExecutableElement> factoryMethod) {
+    checkForDuplicates(subgraphs);
     return new AutoValue_BindingGraph(
         componentDescriptor,
         resolvedContributionBindingsMap,
         resolvedMembersInjectionBindings,
         subgraphs,
-        scopesRequiringReleasableReferenceManagers,
         ownedModules,
         factoryMethod);
+  }
+
+  private static final void checkForDuplicates(Iterable<BindingGraph> graphs) {
+    Map<TypeElement, Collection<BindingGraph>> duplicateGraphs =
+        Maps.filterValues(
+            Multimaps.index(graphs, graph -> graph.componentDescriptor().typeElement()).asMap(),
+            overlapping -> overlapping.size() > 1);
+    if (!duplicateGraphs.isEmpty()) {
+      throw new IllegalArgumentException("Expected no duplicates: " + duplicateGraphs);
+    }
   }
 }

@@ -17,13 +17,11 @@
 package dagger.internal.codegen;
 
 import static com.google.auto.common.MoreTypes.asTypeElement;
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
 import static dagger.internal.codegen.DaggerGraphs.unreachableNodes;
 import static dagger.internal.codegen.DaggerStreams.instancesOf;
 import static dagger.internal.codegen.DaggerStreams.presentValues;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
-import static dagger.model.BindingGraphProxies.childFactoryMethodEdge;
-import static dagger.model.BindingGraphProxies.dependencyEdge;
-import static dagger.model.BindingGraphProxies.subcomponentBuilderBindingEdge;
 import static dagger.model.BindingKind.SUBCOMPONENT_BUILDER;
 
 import com.google.common.collect.ImmutableSet;
@@ -31,12 +29,10 @@ import com.google.common.collect.Iterables;
 import com.google.common.graph.MutableNetwork;
 import com.google.common.graph.Network;
 import com.google.common.graph.NetworkBuilder;
-import dagger.internal.codegen.ComponentDescriptor.ComponentMethodDescriptor;
-import dagger.model.BindingGraph.BindingNode;
 import dagger.model.BindingGraph.ComponentNode;
 import dagger.model.BindingGraph.DependencyEdge;
 import dagger.model.BindingGraph.Edge;
-import dagger.model.BindingGraph.MissingBindingNode;
+import dagger.model.BindingGraph.MissingBinding;
 import dagger.model.BindingGraph.Node;
 import dagger.model.BindingGraphProxies;
 import dagger.model.DependencyRequest;
@@ -74,7 +70,11 @@ final class BindingGraphConverter {
     unreachableNodes(traverser.network.asGraph(), rootComponentNode(traverser.network))
         .forEach(traverser.network::removeNode);
 
-    return BindingGraphProxies.bindingGraph(traverser.network);
+    ComponentKind rootComponentKind = rootGraph.componentDescriptor().kind();
+    return BindingGraphProxies.bindingGraph(
+        traverser.network,
+        rootComponentKind.isForModuleValidation(),
+        !rootComponentKind.isTopLevel());
   }
 
   // TODO(dpb): Example of BindingGraph logic applied to derived networks.
@@ -107,19 +107,16 @@ final class BindingGraphConverter {
 
       network.addNode(currentComponent);
 
-      for (ComponentMethodDescriptor method : graph.componentDescriptor().entryPointMethods()) {
-        addDependencyEdges(currentComponent, method.dependencyRequest().get());
-      }
-
       for (ResolvedBindings resolvedBindings : graph.resolvedBindings()) {
-        for (BindingNode node : bindingNodes(resolvedBindings)) {
-          addBindingNode(node);
-          if (node.binding().kind().equals(SUBCOMPONENT_BUILDER)
-              && node.componentPath().equals(currentComponent.componentPath())) {
+        ImmutableSet<TypeElement> declaringModules = subcomponentDeclaringModules(resolvedBindings);
+        for (BindingNode binding : bindingNodes(resolvedBindings)) {
+          addBinding(binding);
+          if (binding.kind().equals(SUBCOMPONENT_BUILDER)
+              && binding.componentPath().equals(currentComponent.componentPath())) {
             network.addEdge(
-                node,
-                subcomponentNode(node.key().type(), graph),
-                subcomponentBuilderBindingEdge(subcomponentDeclaringModules(resolvedBindings)));
+                binding,
+                subcomponentNode(binding.key().type(), graph),
+                new SubcomponentBuilderBindingEdgeImpl(declaringModules));
           }
         }
       }
@@ -131,9 +128,16 @@ final class BindingGraphConverter {
     }
 
     @Override
+    protected void visitEntryPoint(DependencyRequest entryPoint, BindingGraph graph) {
+      addDependencyEdges(currentComponent, entryPoint);
+      super.visitEntryPoint(entryPoint, graph);
+    }
+
+    @Override
     protected void visitSubcomponentFactoryMethod(
         BindingGraph graph, BindingGraph parent, ExecutableElement factoryMethod) {
-      network.addEdge(parentComponent, currentComponent, childFactoryMethodEdge(factoryMethod));
+      network.addEdge(
+          parentComponent, currentComponent, new ChildFactoryMethodEdgeImpl(factoryMethod));
       super.visitSubcomponentFactoryMethod(graph, parent, factoryMethod);
     }
 
@@ -157,7 +161,9 @@ final class BindingGraphConverter {
       network.addNode(dependency);
       if (!hasDependencyEdge(source, dependency, dependencyRequest)) {
         network.addEdge(
-            source, dependency, dependencyEdge(dependencyRequest, source instanceof ComponentNode));
+            source,
+            dependency,
+            new DependencyEdgeImpl(dependencyRequest, source instanceof ComponentNode));
       }
     }
 
@@ -175,14 +181,14 @@ final class BindingGraphConverter {
       return componentTreePath()
           .pathFromRootToAncestor(source.componentPath().currentComponent())
           .currentGraph()
-          .resolvedBindings(BindingRequest.forDependencyRequest(dependencyRequest));
+          .resolvedBindings(bindingRequest(dependencyRequest));
     }
 
-    /** Adds a binding node and edges for all its dependencies. */
-    private void addBindingNode(BindingNode node) {
-      network.addNode(node);
-      for (DependencyRequest dependencyRequest : node.binding().dependencies()) {
-        addDependencyEdges(node, dependencyRequest);
+    /** Adds a binding and all its dependencies. */
+    private void addBinding(BindingNode binding) {
+      network.addNode(binding);
+      for (DependencyRequest dependencyRequest : binding.dependencies()) {
+        addDependencyEdges(binding, dependencyRequest);
       }
     }
 
@@ -202,9 +208,9 @@ final class BindingGraphConverter {
 
     private BindingNode bindingNode(
         ResolvedBindings resolvedBindings, Binding binding, ComponentDescriptor owningComponent) {
-      return BindingNodeImpl.create(
+      return BindingNode.create(
           componentTreePath()
-              .pathFromRootToAncestor(owningComponent.componentDefinitionType())
+              .pathFromRootToAncestor(owningComponent.typeElement())
               .toComponentPath(),
           binding,
           associatedDeclaringElements(resolvedBindings),
@@ -219,10 +225,10 @@ final class BindingGraphConverter {
           resolvedBindings.subcomponentDeclarations());
     }
 
-    private MissingBindingNode missingBindingNode(ResolvedBindings dependencies) {
+    private MissingBinding missingBindingNode(ResolvedBindings dependencies) {
       return BindingGraphProxies.missingBindingNode(
           componentTreePath()
-              .pathFromRootToAncestor(dependencies.owningComponent().componentDefinitionType())
+              .pathFromRootToAncestor(dependencies.owningComponent().typeElement())
               .toComponentPath(),
           dependencies.key());
     }
@@ -230,9 +236,9 @@ final class BindingGraphConverter {
     private ComponentNode subcomponentNode(TypeMirror subcomponentBuilderType, BindingGraph graph) {
       TypeElement subcomponentBuilderElement = asTypeElement(subcomponentBuilderType);
       ComponentDescriptor subcomponent =
-          graph.componentDescriptor().subcomponentsByBuilderType().get(subcomponentBuilderElement);
+          graph.componentDescriptor().getChildComponentWithBuilderType(subcomponentBuilderElement);
       return ComponentNodeImpl.create(
-          componentTreePath().childPath(subcomponent.componentDefinitionType()).toComponentPath(),
+          componentTreePath().childPath(subcomponent.typeElement()).toComponentPath(),
           subcomponent);
     }
 

@@ -26,7 +26,12 @@ import javax.inject.Inject;
  * A {@link DialogFragment} that injects its members in {@link #onAttach(Context)} and can be used
  * to inject child {@link Fragment}s attached to it. Note that when this fragment gets reattached,
  * its members will be injected again.
+ *
+ * @deprecated Framework fragments are deprecated in Android P; prefer {@code
+ *     dagger.android.support.DaggerDialogFragment} to use a support-library-friendly {@code
+ *     dagger.android} dialog fragment implementation.
  */
+@Deprecated
 @Beta
 public abstract class DaggerDialogFragment extends DialogFragment implements HasFragmentInjector {
 

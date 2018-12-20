@@ -25,6 +25,7 @@ import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Iterables.indexOf;
 import static com.google.common.collect.Iterables.skip;
 import static com.google.common.collect.Multimaps.asMap;
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
 import static java.util.Spliterator.ORDERED;
 import static java.util.Spliterator.SIZED;
@@ -37,11 +38,10 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.LinkedHashMultiset;
-import dagger.internal.codegen.ComponentDescriptor.ComponentMethodDescriptor;
-import dagger.internal.codegen.ComponentDescriptor.ComponentMethodKind;
 import dagger.model.ComponentPath;
 import dagger.model.DependencyRequest;
 import dagger.model.Key;
+import dagger.model.RequestKind;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashSet;
@@ -65,8 +65,8 @@ import javax.lang.model.element.TypeElement;
  * component in the tree, and {@link #visitSubcomponentFactoryMethod(BindingGraph, BindingGraph,
  * ExecutableElement)} to perform custom logic at each subcomponent factory method.
  *
- * <p>Subclasses can override {@link #bindingGraphTraverser(ComponentTreePath,
- * ComponentMethodDescriptor)} to traverse each entry point within each component in the tree.
+ * <p>Subclasses can override {@link #bindingGraphTraverser(ComponentTreePath, DependencyRequest)}
+ * to traverse each entry point within each component in the tree.
  */
 public class ComponentTreeTraverser {
 
@@ -79,7 +79,7 @@ public class ComponentTreeTraverser {
         rootGraph.componentDescriptor().kind().isTopLevel()
             || compilerOptions.aheadOfTimeSubcomponents(),
         "only top-level graphs can be traversed, not %s",
-        rootGraph.componentDescriptor().componentDefinitionType().getQualifiedName());
+        rootGraph.componentTypeElement().getQualifiedName());
     bindingGraphPath.add(rootGraph);
   }
 
@@ -105,8 +105,8 @@ public class ComponentTreeTraverser {
    * <ol>
    *   <li>If this component is installed in its parent by a subcomponent factory method, calls
    *       {@link #visitSubcomponentFactoryMethod(BindingGraph, BindingGraph, ExecutableElement)}.
-   *   <li>For each entry point in the component, calls {@link
-   *       #visitEntryPoint(ComponentMethodDescriptor, BindingGraph)}.
+   *   <li>For each entry point in the component, calls {@link #visitEntryPoint(DependencyRequest,
+   *       BindingGraph)}.
    *   <li>For each child component, calls {@link #visitComponent(BindingGraph)}, updating the
    *       traversal state.
    * </ol>
@@ -116,20 +116,17 @@ public class ComponentTreeTraverser {
   protected void visitComponent(BindingGraph graph) {
     if (bindingGraphPath.size() > 1) {
       BindingGraph parent = Iterators.get(bindingGraphPath.descendingIterator(), 1);
-      ComponentMethodDescriptor childFactoryMethod =
-          parent
-              .componentDescriptor()
-              .subcomponentsByFactoryMethod()
-              .inverse()
-              .get(graph.componentDescriptor());
-      if (childFactoryMethod != null) {
-        visitSubcomponentFactoryMethod(graph, parent, childFactoryMethod.methodElement());
-      }
+      parent
+          .componentDescriptor()
+          .getFactoryMethodForChildComponent(graph.componentDescriptor())
+          .ifPresent(
+              childFactoryMethod ->
+                  visitSubcomponentFactoryMethod(
+                      graph, parent, childFactoryMethod.methodElement()));
     }
 
-    for (ComponentMethodDescriptor entryPointMethod :
-        graph.componentDescriptor().entryPointMethods()) {
-      visitEntryPoint(entryPointMethod, graph);
+    for (DependencyRequest entryPoint : graph.componentDescriptor().entryPoints()) {
+      visitEntryPoint(entryPoint, graph);
     }
 
     for (BindingGraph child : graph.subgraphs()) {
@@ -163,13 +160,13 @@ public class ComponentTreeTraverser {
    * standard order.
    *
    * <p>This implementation passes the entry point and the current component tree path to {@link
-   * #bindingGraphTraverser(ComponentTreePath, ComponentMethodDescriptor)}, and calls {@link
+   * #bindingGraphTraverser(ComponentTreePath, DependencyRequest)}, and calls {@link
    * BindingGraphTraverser#traverseDependencies()} on the returned object.
    *
    * @param graph the graph for the component that contains the entry point
    */
-  protected void visitEntryPoint(ComponentMethodDescriptor entryPointMethod, BindingGraph graph) {
-    bindingGraphTraverser(componentTreePath(), entryPointMethod).traverseDependencies();
+  protected void visitEntryPoint(DependencyRequest entryPoint, BindingGraph graph) {
+    bindingGraphTraverser(componentTreePath(), entryPoint).traverseDependencies();
   }
 
   /**
@@ -180,11 +177,10 @@ public class ComponentTreeTraverser {
    *
    * @param componentPath the path from the root component to the component that includes the entry
    *     point
-   * @param entryPointMethod the entry point method
    */
   protected BindingGraphTraverser bindingGraphTraverser(
-      ComponentTreePath componentPath, ComponentMethodDescriptor entryPointMethod) {
-    return new NoOpBindingGraphTraverser(componentPath, entryPointMethod);
+      ComponentTreePath componentPath, DependencyRequest entryPoint) {
+    return new NoOpBindingGraphTraverser(componentPath, entryPoint);
   }
 
   /**
@@ -204,7 +200,7 @@ public class ComponentTreeTraverser {
   public static class BindingGraphTraverser {
 
     private final ComponentTreePath componentTreePath;
-    private final ComponentMethodDescriptor entryPointMethod;
+    private final DependencyRequest entryPoint;
     private final Deque<DependencyRequest> dependencyRequestPath = new ArrayDeque<>();
     private final Deque<ResolvedBindings> resolvedBindingsPath = new ArrayDeque<>();
     private final LinkedHashMultiset<Key> keysInPath = LinkedHashMultiset.create();
@@ -215,12 +211,11 @@ public class ComponentTreeTraverser {
      *
      * @param componentPath the path from the root component to the component that includes the
      *     entry point to be traversed
-     * @param entryPointMethod the entry point method to be traversed
+     * @param entryPoint the entry point to be traversed
      */
-    public BindingGraphTraverser(
-        ComponentTreePath componentPath, ComponentMethodDescriptor entryPointMethod) {
+    public BindingGraphTraverser(ComponentTreePath componentPath, DependencyRequest entryPoint) {
       this.componentTreePath = componentPath;
-      this.entryPointMethod = entryPointMethod;
+      this.entryPoint = entryPoint;
     }
 
     /**
@@ -234,7 +229,7 @@ public class ComponentTreeTraverser {
       checkState(resolvedBindingsPath.isEmpty());
       checkState(keysInPath.isEmpty());
       checkState(visitedDependencyRequests.isEmpty());
-      nextDependencyRequest(entryPointMethod.dependencyRequest().get(), currentGraph());
+      nextDependencyRequest(entryPoint, currentGraph());
     }
 
     /**
@@ -393,7 +388,7 @@ public class ComponentTreeTraverser {
     private void nextDependencyRequest(
         DependencyRequest dependencyRequest, BindingGraph bindingGraph) {
       ResolvedBindings resolvedBindings =
-          bindingGraph.resolvedBindings(BindingRequest.forDependencyRequest(dependencyRequest));
+          bindingGraph.resolvedBindings(bindingRequest(dependencyRequest));
       dependencyRequestPath.addLast(dependencyRequest);
       resolvedBindingsPath.addLast(resolvedBindings);
       // Don't add the key of a members injection request, as it doesn't participate in cycles
@@ -412,12 +407,12 @@ public class ComponentTreeTraverser {
     }
 
     /**
-     * Returns {@code true} if {@code dependencyRequest} is the {@link #entryPointMethod}'s request
-     * and the entry point is a members injection method.
+     * Returns {@code true} if {@code dependencyRequest} is the {@link #entryPoint} and it's a
+     * members injection method.
      */
     private boolean isComponentMembersInjectionRequest(DependencyRequest dependencyRequest) {
-      return entryPointMethod.kind().equals(ComponentMethodKind.MEMBERS_INJECTION)
-          && entryPointMethod.dependencyRequest().get().equals(dependencyRequest);
+      return dependencyRequest.kind().equals(RequestKind.MEMBERS_INJECTION)
+          && dependencyRequest.equals(entryPoint);
     }
 
     /**
@@ -498,7 +493,7 @@ public class ComponentTreeTraverser {
      * @throws IllegalStateException if this object is not currently traversing dependencies
      */
     protected final Element entryPointElement() {
-      return entryPointMethod.dependencyRequest().get().requestElement().get();
+      return entryPoint.requestElement().get();
     }
 
     /**
@@ -542,8 +537,8 @@ public class ComponentTreeTraverser {
   /** A traverser that does nothing. */
   private static final class NoOpBindingGraphTraverser extends BindingGraphTraverser {
     private NoOpBindingGraphTraverser(
-        ComponentTreePath componentPath, ComponentMethodDescriptor entryPointMethod) {
-      super(componentPath, entryPointMethod);
+        ComponentTreePath componentPath, DependencyRequest entryPoint) {
+      super(componentPath, entryPoint);
     }
 
     @Override
@@ -574,7 +569,7 @@ public class ComponentTreeTraverser {
 
     /** Returns the type of the component at the end of the path. */
     public TypeElement currentComponent() {
-      return currentGraph().componentDescriptor().componentDefinitionType();
+      return currentGraph().componentTypeElement();
     }
 
     /**
@@ -621,7 +616,7 @@ public class ComponentTreeTraverser {
       ImmutableList.Builder<BindingGraph> path = ImmutableList.builder();
       for (BindingGraph graph : graphsInPath()) {
         path.add(graph);
-        if (graph.componentDescriptor().componentDefinitionType().equals(ancestor)) {
+        if (graph.componentTypeElement().equals(ancestor)) {
           return create(path.build());
         }
       }
@@ -638,7 +633,7 @@ public class ComponentTreeTraverser {
      */
     ComponentTreePath childPath(TypeElement subcomponent) {
       for (BindingGraph child : currentGraph().subgraphs()) {
-        if (child.componentType().equals(subcomponent)) {
+        if (child.componentTypeElement().equals(subcomponent)) {
           return create(
               ImmutableList.<BindingGraph>builder().addAll(graphsInPath()).add(child).build());
         }
@@ -646,7 +641,8 @@ public class ComponentTreeTraverser {
       throw new IllegalArgumentException(
           String.format(
               "%s is not a child of %s",
-              subcomponent.getQualifiedName(), currentGraph().componentType().getQualifiedName()));
+              subcomponent.getQualifiedName(),
+              currentGraph().componentTypeElement().getQualifiedName()));
     }
 
     private BindingGraph rootmostGraph(Predicate<? super BindingGraph> predicate) {
@@ -656,14 +652,13 @@ public class ComponentTreeTraverser {
     /** Converts this {@link ComponentTreePath} into a {@link ComponentPath}. */
     ComponentPath toComponentPath() {
       return ComponentPath.create(
-          graphsInPath().stream().map(BindingGraph::componentType).collect(toList()));
+          graphsInPath().stream().map(BindingGraph::componentTypeElement).collect(toList()));
     }
 
     @Override
     public final String toString() {
-      return graphsInPath()
-          .stream()
-          .map(BindingGraph::componentType)
+      return graphsInPath().stream()
+          .map(BindingGraph::componentTypeElement)
           .map(TypeElement::getQualifiedName)
           .collect(joining(" → "));
     }

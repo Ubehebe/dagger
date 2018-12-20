@@ -27,7 +27,7 @@ import static dagger.internal.codegen.ConfigurationAnnotations.getModuleIncludes
 import static dagger.internal.codegen.ConfigurationAnnotations.getModuleSubcomponents;
 import static dagger.internal.codegen.ConfigurationAnnotations.getModules;
 import static dagger.internal.codegen.ConfigurationAnnotations.getSubcomponentAnnotation;
-import static dagger.internal.codegen.ConfigurationAnnotations.getSubcomponentBuilder;
+import static dagger.internal.codegen.ConfigurationAnnotations.getSubcomponentCreator;
 import static dagger.internal.codegen.DaggerElements.getAnnotationMirror;
 import static dagger.internal.codegen.DaggerElements.isAnyAnnotationPresent;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
@@ -52,6 +52,7 @@ import com.google.common.collect.Sets;
 import dagger.Binds;
 import dagger.Module;
 import dagger.Subcomponent;
+import dagger.model.BindingGraph;
 import dagger.multibindings.Multibinds;
 import dagger.producers.ProducerModule;
 import dagger.producers.ProductionSubcomponent;
@@ -111,6 +112,12 @@ final class ModuleValidator {
   private final DaggerElements elements;
   private final AnyBindingMethodValidator anyBindingMethodValidator;
   private final MethodSignatureFormatter methodSignatureFormatter;
+  private final ComponentDescriptor.Factory componentDescriptorFactory;
+  private final BindingGraphFactory bindingGraphFactory;
+  private final BindingGraphConverter bindingGraphConverter;
+  private final BindingGraphPlugins moduleValidationPlugins;
+  private final BindingGraphPlugins spiPlugins;
+  private final CompilerOptions compilerOptions;
   private final Map<TypeElement, ValidationReport<TypeElement>> cache = new HashMap<>();
   private final Set<TypeElement> knownModules = new HashSet<>();
 
@@ -119,11 +126,23 @@ final class ModuleValidator {
       Types types,
       DaggerElements elements,
       AnyBindingMethodValidator anyBindingMethodValidator,
-      MethodSignatureFormatter methodSignatureFormatter) {
+      MethodSignatureFormatter methodSignatureFormatter,
+      ComponentDescriptor.Factory componentDescriptorFactory,
+      BindingGraphFactory bindingGraphFactory,
+      BindingGraphConverter bindingGraphConverter,
+      @ModuleValidation BindingGraphPlugins moduleValidationPlugins,
+      BindingGraphPlugins spiPlugins,
+      CompilerOptions compilerOptions) {
     this.types = types;
     this.elements = elements;
     this.anyBindingMethodValidator = anyBindingMethodValidator;
     this.methodSignatureFormatter = methodSignatureFormatter;
+    this.componentDescriptorFactory = componentDescriptorFactory;
+    this.bindingGraphFactory = bindingGraphFactory;
+    this.bindingGraphConverter = bindingGraphConverter;
+    this.moduleValidationPlugins = moduleValidationPlugins;
+    this.spiPlugins = spiPlugins;
+    this.compilerOptions = compilerOptions;
   }
 
   /**
@@ -156,7 +175,7 @@ final class ModuleValidator {
   private ValidationReport<TypeElement> validateUncached(
       TypeElement module, Set<TypeElement> visitedModules) {
     ValidationReport.Builder<TypeElement> builder = ValidationReport.about(module);
-    ModuleDescriptor.Kind moduleKind = ModuleDescriptor.Kind.forAnnotatedElement(module).get();
+    ModuleKind moduleKind = ModuleKind.forAnnotatedElement(module).get();
 
     ListMultimap<String, ExecutableElement> allMethodsByName = ArrayListMultimap.create();
     ListMultimap<String, ExecutableElement> bindingMethodsByName = ArrayListMultimap.create();
@@ -202,7 +221,7 @@ final class ModuleValidator {
           String.format(
               "A @%s may not contain both non-static @%s methods and "
                   + "abstract @Binds or @Multibinds declarations",
-              moduleKind.moduleAnnotation().getSimpleName(),
+              moduleKind.annotation().getSimpleName(),
               moduleKind.methodAnnotation().getSimpleName()));
     }
 
@@ -218,14 +237,19 @@ final class ModuleValidator {
     validateNoScopeAnnotationsOnModuleElement(module, moduleKind, builder);
     validateSelfCycles(module, builder);
 
+    if (builder.build().isClean()
+        && !compilerOptions.moduleBindingValidationType().equals(ValidationType.NONE)) {
+      validateModuleBindings(module, builder);
+    }
+
     return builder.build();
   }
 
   private void validateReferencedSubcomponents(
       final TypeElement subject,
-      ModuleDescriptor.Kind moduleKind,
+      ModuleKind moduleKind,
       final ValidationReport.Builder<TypeElement> builder) {
-    final AnnotationMirror moduleAnnotation = moduleKind.getModuleAnnotationMirror(subject).get();
+    final AnnotationMirror moduleAnnotation = moduleKind.getModuleAnnotation(subject);
     // TODO(ronshapiro): use validateTypesAreDeclared when it is checked in
     for (TypeMirror subcomponentAttribute : getModuleSubcomponents(moduleAnnotation)) {
       subcomponentAttribute.accept(
@@ -277,7 +301,7 @@ final class ModuleValidator {
       TypeElement subcomponentAttribute,
       AnnotationMirror moduleAnnotation,
       ValidationReport.Builder<TypeElement> builder) {
-    if (getSubcomponentBuilder(subcomponentAttribute).isPresent()) {
+    if (getSubcomponentCreator(subcomponentAttribute).isPresent()) {
       return;
     }
     builder.addError(
@@ -322,7 +346,7 @@ final class ModuleValidator {
   }
 
   private void validateMethodsWithSameName(
-      ModuleDescriptor.Kind moduleKind,
+      ModuleKind moduleKind,
       ValidationReport.Builder<TypeElement> builder,
       ListMultimap<String, ExecutableElement> bindingMethodsByName) {
     for (Entry<String, Collection<ExecutableElement>> entry :
@@ -341,13 +365,14 @@ final class ModuleValidator {
 
   private void validateReferencedModules(
       TypeElement subject,
-      ModuleDescriptor.Kind moduleKind,
+      ModuleKind moduleKind,
       Set<TypeElement> visitedModules,
       ValidationReport.Builder<TypeElement> builder) {
     // Validate that all the modules we include are valid for inclusion.
-    AnnotationMirror mirror = moduleKind.getModuleAnnotationMirror(subject).get();
+    AnnotationMirror mirror = moduleKind.getModuleAnnotation(subject);
     builder.addSubreport(
-        validateReferencedModules(subject, mirror, moduleKind.includesKinds(), visitedModules));
+        validateReferencedModules(
+            subject, mirror, moduleKind.legalIncludedModuleKinds(), visitedModules));
   }
 
   /**
@@ -368,14 +393,11 @@ final class ModuleValidator {
   ValidationReport<TypeElement> validateReferencedModules(
       TypeElement annotatedType,
       AnnotationMirror annotation,
-      ImmutableSet<ModuleDescriptor.Kind> validModuleKinds,
+      ImmutableSet<ModuleKind> validModuleKinds,
       Set<TypeElement> visitedModules) {
     ValidationReport.Builder<TypeElement> subreport = ValidationReport.about(annotatedType);
     ImmutableSet<? extends Class<? extends Annotation>> validModuleAnnotations =
-        validModuleKinds
-            .stream()
-            .map(ModuleDescriptor.Kind::moduleAnnotation)
-            .collect(toImmutableSet());
+        validModuleKinds.stream().map(ModuleKind::annotation).collect(toImmutableSet());
 
     for (AnnotationValue includedModule : getModules(annotatedType, annotation)) {
       asType(includedModule)
@@ -423,7 +445,7 @@ final class ModuleValidator {
 
   private void validateProvidesOverrides(
       TypeElement subject,
-      ModuleDescriptor.Kind moduleKind,
+      ModuleKind moduleKind,
       ValidationReport.Builder<TypeElement> builder,
       ListMultimap<String, ExecutableElement> allMethodsByName,
       ListMultimap<String, ExecutableElement> bindingMethodsByName) {
@@ -487,7 +509,7 @@ final class ModuleValidator {
 
   private void validateModuleVisibility(
       final TypeElement moduleElement,
-      ModuleDescriptor.Kind moduleKind,
+      ModuleKind moduleKind,
       final ValidationReport.Builder<?> reportBuilder) {
     Visibility moduleVisibility = Visibility.ofElement(moduleElement);
     if (moduleVisibility.equals(PRIVATE)) {
@@ -507,7 +529,7 @@ final class ModuleValidator {
           ImmutableSet<Element> nonPublicModules =
               FluentIterable.from(
                       getModuleIncludes(
-                          getAnnotationMirror(moduleElement, moduleKind.moduleAnnotation()).get()))
+                          getAnnotationMirror(moduleElement, moduleKind.annotation()).get()))
                   .transform(types::asElement)
                   .filter(element -> effectiveVisibilityOfElement(element).compareTo(PUBLIC) < 0)
                   .toSet();
@@ -528,14 +550,12 @@ final class ModuleValidator {
   }
 
   private void validateNoScopeAnnotationsOnModuleElement(
-      TypeElement module,
-      ModuleDescriptor.Kind moduleKind,
-      ValidationReport.Builder<TypeElement> report) {
+      TypeElement module, ModuleKind moduleKind, ValidationReport.Builder<TypeElement> report) {
     for (AnnotationMirror scope : getAnnotatedAnnotations(module, Scope.class)) {
       report.addError(
           String.format(
               "@%ss cannot be scoped. Did you mean to scope a method instead?",
-              moduleKind.moduleAnnotation().getSimpleName()),
+              moduleKind.annotation().getSimpleName()),
           module,
           scope);
     }
@@ -568,6 +588,20 @@ final class ModuleValidator {
               }
             },
             null);
+  }
+
+  private void validateModuleBindings(
+      TypeElement module, ValidationReport.Builder<TypeElement> report) {
+    BindingGraph bindingGraph =
+        bindingGraphConverter.convert(
+            bindingGraphFactory.create(componentDescriptorFactory.forTypeElement(module)));
+    if (moduleValidationPlugins.pluginsReportErrors(bindingGraph)
+        || spiPlugins.pluginsReportErrors(bindingGraph)) {
+      // Since the plugins use a DiagnosticReporter to report errors, the ValdiationReport won't
+      // have any Items for them. We have to tell the ValidationReport that some errors were
+      // reported for the subject.
+      report.markDirty();
+    }
   }
 
   private static String formatListForErrorMessage(List<?> things) {

@@ -19,7 +19,7 @@ package dagger.internal.codegen;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.squareup.javapoet.MethodSpec.methodBuilder;
-import static dagger.internal.codegen.GeneratedComponentModel.MethodSpecKind.PRIVATE_METHOD;
+import static dagger.internal.codegen.ComponentImplementation.MethodSpecKind.PRIVATE_METHOD;
 import static javax.lang.model.element.Modifier.PRIVATE;
 
 import com.squareup.javapoet.TypeName;
@@ -33,28 +33,29 @@ final class PrivateMethodBindingExpression extends MethodBindingExpression {
   private final ContributionBinding binding;
   private final BindingRequest request;
   private final BindingMethodImplementation methodImplementation;
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
   private String methodName;
 
   PrivateMethodBindingExpression(
-      ResolvedBindings resolvedBindings,
+      ContributionBinding binding,
       BindingRequest request,
       BindingMethodImplementation methodImplementation,
-      GeneratedComponentModel generatedComponentModel) {
-    super(methodImplementation, generatedComponentModel);
-    this.binding = resolvedBindings.contributionBinding();
+      ComponentImplementation componentImplementation,
+      DaggerTypes types) {
+    super(request, methodImplementation, componentImplementation, types);
+    this.binding = checkNotNull(binding);
     this.request = checkNotNull(request);
     this.methodImplementation = checkNotNull(methodImplementation);
-    this.generatedComponentModel = checkNotNull(generatedComponentModel);
+    this.componentImplementation = checkNotNull(componentImplementation);
   }
 
   @Override
   protected void addMethod() {
     if (methodName == null) {
       // Have to set methodName field before implementing the method in order to handle recursion.
-      methodName = generatedComponentModel.getUniqueMethodName(request, binding);
+      methodName = componentImplementation.getUniqueMethodName(request, binding);
       // TODO(user): Fix the order that these generated methods are written to the component.
-      generatedComponentModel.addMethod(
+      componentImplementation.addMethod(
           PRIVATE_METHOD,
           methodBuilder(methodName)
               .addModifiers(PRIVATE)

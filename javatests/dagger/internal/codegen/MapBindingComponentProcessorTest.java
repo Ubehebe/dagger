@@ -130,10 +130,10 @@ public class MapBindingComponentProcessorTest {
                 "",
                 GENERATED_ANNOTATION,
                 "public final class DaggerTestComponent implements TestComponent {",
-                "  private volatile Provider<Map<PathEnum, Provider<Handler>>>",
-                "      mapOfPathEnumAndProviderOfHandlerProvider;",
                 "  private volatile Provider<Handler> provideAdminHandlerProvider;",
                 "  private volatile Provider<Handler> provideLoginHandlerProvider;",
+                "  private volatile Provider<Map<PathEnum, Provider<Handler>>>",
+                "      mapOfPathEnumAndProviderOfHandlerProvider;",
                 "  private MapModuleOne mapModuleOne;",
                 "  private MapModuleTwo mapModuleTwo;",
                 "",
@@ -185,13 +185,14 @@ public class MapBindingComponentProcessorTest {
                 "    public T get() {",
                 "      switch (id) {",
                 "        case 0:",
-                "            return (T) getMapOfPathEnumAndProviderOfHandler();",
+                "            return (T) DaggerTestComponent.this",
+                "                 .getMapOfPathEnumAndProviderOfHandler();",
                 "        case 1:",
                 "            return (T) MapModuleOne_ProvideAdminHandlerFactory",
-                "                .proxyProvideAdminHandler(mapModuleOne);",
+                "                .proxyProvideAdminHandler(DaggerTestComponent.this.mapModuleOne);",
                 "        case 2:",
                 "            return (T) MapModuleTwo_ProvideLoginHandlerFactory",
-                "                .proxyProvideLoginHandler(mapModuleTwo);",
+                "                .proxyProvideLoginHandler(DaggerTestComponent.this.mapModuleTwo);",
                 "        default: throw new AssertionError(id);",
                 "      }",
                 "    }",
@@ -535,10 +536,10 @@ public class MapBindingComponentProcessorTest {
                 "",
                 GENERATED_ANNOTATION,
                 "public final class DaggerTestComponent implements TestComponent {",
-                "  private volatile Provider<Map<String, Provider<Handler>>>",
-                "      mapOfStringAndProviderOfHandlerProvider;",
                 "  private volatile Provider<Handler> provideAdminHandlerProvider;",
                 "  private volatile Provider<Handler> provideLoginHandlerProvider;",
+                "  private volatile Provider<Map<String, Provider<Handler>>>",
+                "      mapOfStringAndProviderOfHandlerProvider;",
                 "  private MapModuleOne mapModuleOne;",
                 "  private MapModuleTwo mapModuleTwo;",
                 "",
@@ -590,13 +591,14 @@ public class MapBindingComponentProcessorTest {
                 "    public T get() {",
                 "      switch (id) {",
                 "        case 0:",
-                "            return (T) getMapOfStringAndProviderOfHandler();",
+                "            return (T) DaggerTestComponent.this",
+                "                 .getMapOfStringAndProviderOfHandler();",
                 "        case 1:",
                 "            return (T) MapModuleOne_ProvideAdminHandlerFactory",
-                "                .proxyProvideAdminHandler(mapModuleOne);",
+                "                .proxyProvideAdminHandler(DaggerTestComponent.this.mapModuleOne);",
                 "        case 2:",
                 "            return (T) MapModuleTwo_ProvideLoginHandlerFactory",
-                "                .proxyProvideLoginHandler(mapModuleTwo);",
+                "                .proxyProvideLoginHandler(DaggerTestComponent.this.mapModuleTwo);",
                 "        default: throw new AssertionError(id);",
                 "      }",
                 "    }",
@@ -733,12 +735,17 @@ public class MapBindingComponentProcessorTest {
                 "",
                 GENERATED_ANNOTATION,
                 "public final class DaggerTestComponent implements TestComponent {",
-                "  private volatile Provider<Map<WrappedClassKey, Provider<Handler>>>",
-                "      mapOfWrappedClassKeyAndProviderOfHandlerProvider;",
                 "  private volatile Provider<Handler> provideAdminHandlerProvider;",
                 "  private volatile Provider<Handler> provideLoginHandlerProvider;",
+                "  private volatile Provider<Map<WrappedClassKey, Provider<Handler>>>",
+                "      mapOfWrappedClassKeyAndProviderOfHandlerProvider;",
                 "  private MapModuleOne mapModuleOne;",
                 "  private MapModuleTwo mapModuleTwo;",
+                "",
+                "  private DaggerTestComponent(Builder builder) {",
+                "    this.mapModuleOne = builder.mapModuleOne;",
+                "    this.mapModuleTwo = builder.mapModuleTwo;",
+                "  }",
                 "",
                 "  private Provider<Handler>",
                 "        getMapOfWrappedClassKeyAndProviderOfHandlerProvider() {",
@@ -769,12 +776,6 @@ public class MapBindingComponentProcessorTest {
                 "        getMapOfWrappedClassKeyAndProviderOfHandlerProvider2());",
                 "  }",
                 "",
-                "  @SuppressWarnings(\"unchecked\")",
-                "  private void initialize(final Builder builder) {",
-                "    this.mapModuleOne = builder.mapModuleOne;",
-                "    this.mapModuleTwo = builder.mapModuleTwo;",
-                "  }",
-                "",
                 "  @Override",
                 "  public Provider<Map<WrappedClassKey, Provider<Handler>>> dispatcher() {",
                 "    Object local = mapOfWrappedClassKeyAndProviderOfHandlerProvider;",
@@ -798,13 +799,14 @@ public class MapBindingComponentProcessorTest {
                 "    public T get() {",
                 "      switch (id) {",
                 "        case 0:",
-                "            return (T) getMapOfWrappedClassKeyAndProviderOfHandler();",
+                "            return (T) DaggerTestComponent.this",
+                "                 .getMapOfWrappedClassKeyAndProviderOfHandler();",
                 "        case 1:",
                 "            return (T) MapModuleOne_ProvideAdminHandlerFactory",
-                "                .proxyProvideAdminHandler(mapModuleOne);",
+                "                .proxyProvideAdminHandler(DaggerTestComponent.this.mapModuleOne);",
                 "        case 2:",
                 "            return (T) MapModuleTwo_ProvideLoginHandlerFactory",
-                "                .proxyProvideLoginHandler(mapModuleTwo);",
+                "                .proxyProvideLoginHandler(DaggerTestComponent.this.mapModuleTwo);",
                 "        default: throw new AssertionError(id);",
                 "      }",
                 "    }",
@@ -981,7 +983,7 @@ public class MapBindingComponentProcessorTest {
                 "    @Override",
                 "    public T get() {",
                 "      switch (id) {",
-                "        case 0: return (T) getMapOfPathEnumAndHandler();",
+                "        case 0: return (T) DaggerTestComponent.this.getMapOfPathEnumAndHandler();",
                 "        default: throw new AssertionError(id);",
                 "      }",
                 "    }",
@@ -1087,105 +1089,5 @@ public class MapBindingComponentProcessorTest {
     assertThat(compilation)
         .generatedSourceFile("test.DaggerTestComponent")
         .containsElementsIn(generatedComponent);
-  }
-
-  @Test
-  public void mapBindingsWithDuplicateKeys() {
-    JavaFileObject module =
-        JavaFileObjects.forSourceLines(
-            "test.MapModule",
-            "package test;",
-            "",
-            "import dagger.Module;",
-            "import dagger.Provides;",
-            "import dagger.multibindings.StringKey;",
-            "import dagger.multibindings.IntoMap;",
-            "",
-            "@Module",
-            "final class MapModule {",
-            "  @Provides @IntoMap @StringKey(\"AKey\") Object provideObjectForAKey() {",
-            "    return \"one\";",
-            "  }",
-            "",
-            "  @Provides @IntoMap @StringKey(\"AKey\") Object provideObjectForAKeyAgain() {",
-            "    return \"one again\";",
-            "  }",
-            "}");
-    JavaFileObject componentFile =
-        JavaFileObjects.forSourceLines(
-            "test.TestComponent",
-            "package test;",
-            "",
-            "import dagger.Component;",
-            "import java.util.Map;",
-            "import javax.inject.Provider;",
-            "",
-            "@Component(modules = {MapModule.class})",
-            "interface TestComponent {",
-            "  Map<String, Object> objects();",
-            "}");
-    Compilation compilation =
-        daggerCompiler().withOptions(compilerMode.javacopts()).compile(module, componentFile);
-    assertThat(compilation).failed();
-    assertThat(compilation).hadErrorContaining("The same map key is bound more than once");
-    assertThat(compilation).hadErrorContaining("provideObjectForAKey()");
-    assertThat(compilation).hadErrorContaining("provideObjectForAKeyAgain()");
-    assertThat(compilation).hadErrorCount(1);
-  }
-
-  @Test
-  public void mapBindingsWithInconsistentKeyAnnotations() {
-    JavaFileObject module =
-        JavaFileObjects.forSourceLines(
-            "test.MapModule",
-            "package test;",
-            "",
-            "import dagger.Module;",
-            "import dagger.Provides;",
-            "import dagger.multibindings.StringKey;",
-            "import dagger.multibindings.IntoMap;",
-            "",
-            "@Module",
-            "final class MapModule {",
-            "  @Provides @IntoMap @StringKey(\"AKey\") Object provideObjectForAKey() {",
-            "    return \"one\";",
-            "  }",
-            "",
-            "  @Provides @IntoMap @StringKeyTwo(\"BKey\") Object provideObjectForBKey() {",
-            "    return \"two\";",
-            "  }",
-            "}");
-    JavaFileObject stringKeyTwoFile =
-        JavaFileObjects.forSourceLines(
-            "test.StringKeyTwo",
-            "package test;",
-            "",
-            "import dagger.MapKey;",
-            "",
-            "@MapKey(unwrapValue = true)",
-            "public @interface StringKeyTwo {",
-            "  String value();",
-            "}");
-    JavaFileObject componentFile =
-        JavaFileObjects.forSourceLines(
-            "test.TestComponent",
-            "package test;",
-            "",
-            "import dagger.Component;",
-            "import java.util.Map;",
-            "",
-            "@Component(modules = {MapModule.class})",
-            "interface TestComponent {",
-            "  Map<String, Object> objects();",
-            "}");
-    Compilation compilation =
-        daggerCompiler()
-            .withOptions(compilerMode.javacopts())
-            .compile(module, stringKeyTwoFile, componentFile);
-    assertThat(compilation).failed();
-    assertThat(compilation).hadErrorContaining("uses more than one @MapKey annotation type");
-    assertThat(compilation).hadErrorContaining("provideObjectForAKey()");
-    assertThat(compilation).hadErrorContaining("provideObjectForBKey()");
-    assertThat(compilation).hadErrorCount(1);
   }
 }

@@ -24,11 +24,13 @@ import static com.squareup.javapoet.MethodSpec.methodBuilder;
 import static com.squareup.javapoet.TypeSpec.classBuilder;
 import static dagger.internal.codegen.AnnotationSpecs.Suppression.UNCHECKED;
 import static dagger.internal.codegen.CodeBlocks.makeParametersCodeBlock;
+import static dagger.internal.codegen.CodeBlocks.toParametersCodeBlock;
 import static dagger.internal.codegen.GwtCompatibility.gwtIncompatibleAnnotation;
 import static dagger.internal.codegen.SourceFiles.bindingTypeElementTypeVariableNames;
 import static dagger.internal.codegen.SourceFiles.frameworkTypeUsageStatement;
 import static dagger.internal.codegen.SourceFiles.generateBindingFieldsForDependencies;
 import static dagger.internal.codegen.SourceFiles.generatedClassNameForBinding;
+import static dagger.internal.codegen.SourceFiles.parameterizedGeneratedTypeNameForBinding;
 import static dagger.internal.codegen.TypeNames.FUTURES;
 import static dagger.internal.codegen.TypeNames.PRODUCERS;
 import static dagger.internal.codegen.TypeNames.PRODUCER_TOKEN;
@@ -41,6 +43,7 @@ import static javax.lang.model.element.Modifier.FINAL;
 import static javax.lang.model.element.Modifier.PRIVATE;
 import static javax.lang.model.element.Modifier.PROTECTED;
 import static javax.lang.model.element.Modifier.PUBLIC;
+import static javax.lang.model.element.Modifier.STATIC;
 
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
@@ -59,6 +62,7 @@ import dagger.model.Key;
 import dagger.model.RequestKind;
 import dagger.producers.Producer;
 import dagger.producers.internal.AbstractProducesMethodProducer;
+import dagger.producers.internal.Producers;
 import java.util.Map;
 import java.util.Optional;
 import javax.annotation.processing.Filer;
@@ -121,7 +125,7 @@ final class ProducerFactoryGenerator extends SourceFileGenerator<ProductionBindi
     UniqueNameSet uniqueFieldNames = new UniqueNameSet();
     ImmutableMap.Builder<Key, FieldSpec> fieldsBuilder = ImmutableMap.builder();
 
-    MethodSpec.Builder constructorBuilder = constructorBuilder().addModifiers(PUBLIC);
+    MethodSpec.Builder constructorBuilder = constructorBuilder().addModifiers(PRIVATE);
 
     Optional<FieldSpec> moduleField =
         binding.requiresModuleInstance()
@@ -133,42 +137,43 @@ final class ProducerFactoryGenerator extends SourceFileGenerator<ProductionBindi
                     TypeName.get(binding.bindingTypeElement().get().asType())))
             : Optional.empty();
 
-    String executorParameterName = null;
-    String monitorParameterName = null;
-    for (Map.Entry<Key, FrameworkField> entry :
-        generateBindingFieldsForDependencies(binding).entrySet()) {
-      Key key = entry.getKey();
-      FrameworkField bindingField = entry.getValue();
-      String fieldName = uniqueFieldNames.getUniqueName(bindingField.name());
-      if (key.equals(keyFactory.forProductionImplementationExecutor())) {
-        executorParameterName = fieldName;
-        constructorBuilder.addParameter(bindingField.type(), executorParameterName);
-        continue;
-      } else if (key.equals(keyFactory.forProductionComponentMonitor())) {
-        monitorParameterName = fieldName;
-        constructorBuilder.addParameter(bindingField.type(), monitorParameterName);
-        continue;
-      }
-      FieldSpec field =
-          addFieldAndConstructorParameter(
-              factoryBuilder, constructorBuilder, fieldName, bindingField.type());
-      fieldsBuilder.put(key, field);
-    }
+    String[] executorParameterName = new String[1];
+    String[] monitorParameterName = new String[1];
+    Map<Key, FrameworkField> bindingFieldsForDependencies =
+        generateBindingFieldsForDependencies(binding);
+    bindingFieldsForDependencies.forEach(
+        (key, bindingField) -> {
+          String fieldName = uniqueFieldNames.getUniqueName(bindingField.name());
+          if (key.equals(keyFactory.forProductionImplementationExecutor())) {
+            executorParameterName[0] = fieldName;
+            constructorBuilder.addParameter(bindingField.type(), executorParameterName[0]);
+          } else if (key.equals(keyFactory.forProductionComponentMonitor())) {
+            monitorParameterName[0] = fieldName;
+            constructorBuilder.addParameter(bindingField.type(), monitorParameterName[0]);
+          } else {
+            FieldSpec field =
+                addFieldAndConstructorParameter(
+                    factoryBuilder, constructorBuilder, fieldName, bindingField.type());
+            fieldsBuilder.put(key, field);
+          }
+        });
     ImmutableMap<Key, FieldSpec> fields = fieldsBuilder.build();
 
     constructorBuilder.addStatement(
         "super($N, $L, $N)",
-        verifyNotNull(monitorParameterName),
+        verifyNotNull(monitorParameterName[0]),
         producerTokenConstruction(generatedTypeName, binding),
-        verifyNotNull(executorParameterName));
+        verifyNotNull(executorParameterName[0]));
 
     if (binding.requiresModuleInstance()) {
-      assignField(constructorBuilder, moduleField.get());
+      assignField(constructorBuilder, moduleField.get(), null);
     }
-    
-    for (FieldSpec field : fields.values()) {
-      assignField(constructorBuilder, field);
-    }
+
+    fields.forEach(
+        (key, field) -> {
+          ParameterizedTypeName type = bindingFieldsForDependencies.get(key).type();
+          assignField(constructorBuilder, field, type);
+        });
 
     MethodSpec.Builder collectDependenciesBuilder =
         methodBuilder("collectDependencies")
@@ -207,13 +212,15 @@ final class ProducerFactoryGenerator extends SourceFileGenerator<ProductionBindi
       callProducesMethod.addAnnotation(AnnotationSpecs.suppressWarnings(UNCHECKED));
     }
 
+    MethodSpec constructor = constructorBuilder.build();
     factoryBuilder
         .superclass(
             ParameterizedTypeName.get(
                 ClassName.get(AbstractProducesMethodProducer.class),
                 futureTransform.applyArgType(),
                 providedTypeName))
-        .addMethod(constructorBuilder.build())
+        .addMethod(constructor)
+        .addMethod(staticFactoryMethod(binding, constructor))
         .addMethod(collectDependenciesBuilder.build())
         .addMethod(callProducesMethod.build());
 
@@ -221,6 +228,21 @@ final class ProducerFactoryGenerator extends SourceFileGenerator<ProductionBindi
 
     // TODO(gak): write a sensible toString
     return Optional.of(factoryBuilder);
+  }
+
+  private MethodSpec staticFactoryMethod(ProductionBinding binding, MethodSpec constructor) {
+    return MethodSpec.methodBuilder("create")
+        .addModifiers(PUBLIC, STATIC)
+        .returns(parameterizedGeneratedTypeNameForBinding(binding))
+        .addTypeVariables(bindingTypeElementTypeVariableNames(binding))
+        .addParameters(constructor.parameters)
+        .addStatement(
+            "return new $T($L)",
+            parameterizedGeneratedTypeNameForBinding(binding),
+            constructor.parameters.stream()
+                .map(p -> CodeBlock.of("$N", p.name))
+                .collect(toParametersCodeBlock()))
+        .build();
   }
 
   // TODO(ronshapiro): consolidate versions of these
@@ -235,8 +257,14 @@ final class ProducerFactoryGenerator extends SourceFileGenerator<ProductionBindi
     return field;
   }
 
-  private static void assignField(MethodSpec.Builder constructorBuilder, FieldSpec field) {
-    constructorBuilder.addStatement("this.$1N = $1N", field);
+  private static void assignField(
+      MethodSpec.Builder constructorBuilder, FieldSpec field, ParameterizedTypeName type) {
+    if (type != null && type.rawType.equals(TypeNames.PRODUCER)) {
+      constructorBuilder.addStatement(
+          "this.$1N = $2T.nonCancellationPropagatingViewOf($1N)", field, Producers.class);
+    } else {
+      constructorBuilder.addStatement("this.$1N = $1N", field);
+    }
   }
 
   /** Returns a list of dependencies that are generated asynchronously. */

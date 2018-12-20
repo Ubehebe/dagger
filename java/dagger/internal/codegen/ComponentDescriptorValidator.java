@@ -16,39 +16,40 @@
 
 package dagger.internal.codegen;
 
+import static com.google.auto.common.MoreTypes.asDeclared;
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Predicates.in;
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static dagger.internal.codegen.ComponentRequirement.Kind.BOUND_INSTANCE;
 import static dagger.internal.codegen.ConfigurationAnnotations.getComponentAnnotation;
 import static dagger.internal.codegen.ConfigurationAnnotations.getComponentDependencies;
 import static dagger.internal.codegen.DaggerElements.getAnnotationMirror;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
+import static dagger.internal.codegen.DaggerStreams.toImmutableSetMultimap;
 import static dagger.internal.codegen.DiagnosticFormatting.stripCommonTypePrefixes;
 import static dagger.internal.codegen.Formatter.INDENT;
 import static dagger.internal.codegen.Scopes.getReadableSource;
 import static dagger.internal.codegen.Scopes.scopesOf;
 import static dagger.internal.codegen.Scopes.singletonScope;
 import static dagger.internal.codegen.Util.reentrantComputeIfAbsent;
-import static java.util.stream.Collectors.groupingBy;
 import static java.util.stream.Collectors.joining;
-import static java.util.stream.Collectors.mapping;
 import static java.util.stream.Collectors.toList;
 
 import com.google.auto.common.MoreTypes;
-import com.google.common.base.Equivalence;
+import com.google.common.base.Equivalence.Wrapper;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ImmutableSetMultimap;
+import com.google.common.collect.Multimaps;
 import com.google.common.collect.Sets;
 import dagger.Component;
-import dagger.internal.codegen.ComponentDescriptor.BuilderRequirementMethod;
-import dagger.internal.codegen.ComponentDescriptor.BuilderSpec;
 import dagger.internal.codegen.ComponentRequirement.NullPolicy;
-import dagger.internal.codegen.ErrorMessages.ComponentBuilderMessages;
+import dagger.internal.codegen.ErrorMessages.ComponentCreatorMessages;
 import dagger.model.Scope;
 import java.util.ArrayDeque;
+import java.util.Collection;
 import java.util.Deque;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 import javax.inject.Inject;
@@ -112,7 +113,7 @@ final class ComponentDescriptorValidator {
     /** Returns a report that contains all validation messages found during traversal. */
     ValidationReport<TypeElement> buildReport() {
       ValidationReport.Builder<TypeElement> report =
-          ValidationReport.about(rootComponent.componentDefinitionType());
+          ValidationReport.about(rootComponent.typeElement());
       reports.values().forEach(subreport -> report.addSubreport(subreport.build()));
       return report.build();
     }
@@ -120,23 +121,20 @@ final class ComponentDescriptorValidator {
     /** Returns the report builder for a (sub)component. */
     private ValidationReport.Builder<TypeElement> report(ComponentDescriptor component) {
       return reentrantComputeIfAbsent(
-          reports,
-          component,
-          descriptor -> ValidationReport.about(descriptor.componentDefinitionType()));
+          reports, component, descriptor -> ValidationReport.about(descriptor.typeElement()));
     }
 
     void visitComponent(ComponentDescriptor component) {
       validateDependencyScopes(component);
       validateComponentDependencyHierarchy(component);
       validateModules(component);
-      validateBuilders(component);
-      component.subcomponents().forEach(this::visitComponent);
+      validateCreators(component);
+      component.childComponents().forEach(this::visitComponent);
     }
 
     /** Validates that component dependencies do not form a cycle. */
     private void validateComponentDependencyHierarchy(ComponentDescriptor component) {
-      validateComponentDependencyHierarchy(
-          component, component.componentDefinitionType(), new ArrayDeque<>());
+      validateComponentDependencyHierarchy(component, component.typeElement(), new ArrayDeque<>());
     }
 
     /** Recursive method to validate that component dependencies do not form a cycle. */
@@ -145,7 +143,7 @@ final class ComponentDescriptorValidator {
       if (dependencyStack.contains(dependency)) {
         // Current component has already appeared in the component chain.
         StringBuilder message = new StringBuilder();
-        message.append(component.componentDefinitionType().getQualifiedName());
+        message.append(component.typeElement().getQualifiedName());
         message.append(" contains a cycle in its component dependencies:\n");
         dependencyStack.push(dependency);
         appendIndentedComponentsList(message, dependencyStack);
@@ -154,8 +152,8 @@ final class ComponentDescriptorValidator {
             .addItem(
                 message.toString(),
                 compilerOptions.scopeCycleValidationType().diagnosticKind().get(),
-                component.componentDefinitionType(),
-                getComponentAnnotation(component.componentDefinitionType()).get());
+                component.typeElement(),
+                getComponentAnnotation(component.typeElement()).get());
       } else {
         Optional<AnnotationMirror> componentAnnotation = getComponentAnnotation(dependency);
         if (componentAnnotation.isPresent()) {
@@ -201,8 +199,8 @@ final class ComponentDescriptorValidator {
                 .addItem(
                     message.toString(),
                     compilerOptions.scopeCycleValidationType().diagnosticKind().get(),
-                    component.componentDefinitionType(),
-                    component.componentAnnotation());
+                    component.typeElement(),
+                    component.annotation());
           }
         } else if (scopedDependencies.size() > 1) {
           // Scoped components may depend on at most one scoped component.
@@ -211,42 +209,33 @@ final class ComponentDescriptorValidator {
             message.append(getReadableSource(scope)).append(' ');
           }
           message
-              .append(component.componentDefinitionType().getQualifiedName())
+              .append(component.typeElement().getQualifiedName())
               .append(" depends on more than one scoped component:\n");
           appendIndentedComponentsList(message, scopedDependencies);
           report(component)
-              .addError(
-                  message.toString(),
-                  component.componentDefinitionType(),
-                  component.componentAnnotation());
+              .addError(message.toString(), component.typeElement(), component.annotation());
         } else {
           // Dagger 1.x scope compatibility requires this be suppress-able.
           if (!compilerOptions.scopeCycleValidationType().equals(ValidationType.NONE)) {
             validateDependencyScopeHierarchy(
-                component,
-                component.componentDefinitionType(),
-                new ArrayDeque<ImmutableSet<Scope>>(),
-                new ArrayDeque<TypeElement>());
+                component, component.typeElement(), new ArrayDeque<>(), new ArrayDeque<>());
           }
         }
       } else {
         // Scopeless components may not depend on scoped components.
         if (!scopedDependencies.isEmpty()) {
           StringBuilder message =
-              new StringBuilder(component.componentDefinitionType().getQualifiedName())
+              new StringBuilder(component.typeElement().getQualifiedName())
                   .append(" (unscoped) cannot depend on scoped components:\n");
           appendIndentedComponentsList(message, scopedDependencies);
           report(component)
-              .addError(
-                  message.toString(),
-                  component.componentDefinitionType(),
-                  component.componentAnnotation());
+              .addError(message.toString(), component.typeElement(), component.annotation());
         }
       }
     }
 
     private void validateModules(ComponentDescriptor component) {
-      for (ModuleDescriptor module : component.transitiveModules()) {
+      for (ModuleDescriptor module : component.modules()) {
         if (module.moduleElement().getModifiers().contains(Modifier.ABSTRACT)) {
           for (ContributionBinding binding : module.bindings()) {
             if (binding.requiresModuleInstance()) {
@@ -276,81 +265,84 @@ final class ComponentDescriptorValidator {
           module.moduleElement(), methodAnnotations);
     }
 
-    private void validateBuilders(ComponentDescriptor component) {
-      ComponentDescriptor componentDesc = component;
-      if (!componentDesc.builderSpec().isPresent()) {
+    private void validateCreators(ComponentDescriptor component) {
+      if (!component.creatorDescriptor().isPresent()) {
         // If no builder, nothing to validate.
         return;
       }
 
-      Set<ComponentRequirement> availableDependencies = component.availableDependencies();
-      Set<ComponentRequirement> requiredDependencies =
-          Sets.filter(
-              availableDependencies,
-              input -> input.nullPolicy(elements, types).equals(NullPolicy.THROW));
-      final BuilderSpec spec = componentDesc.builderSpec().get();
-      ImmutableSet<BuilderRequirementMethod> declaredSetters =
-          spec.requirementMethods()
-              .stream()
-              .filter(method -> !method.requirement().kind().equals(BOUND_INSTANCE))
-              .collect(toImmutableSet());
-      ImmutableSet<ComponentRequirement> declaredRequirements =
-          declaredSetters
-              .stream()
-              .map(BuilderRequirementMethod::requirement)
-              .collect(toImmutableSet());
+      ComponentCreatorDescriptor creator = component.creatorDescriptor().get();
+      ComponentCreatorMessages msgs = ErrorMessages.creatorMessagesFor(component.kind());
 
-      ComponentBuilderMessages msgs = ErrorMessages.builderMsgsFor(component.kind());
-      Set<ComponentRequirement> extraSetters =
-          Sets.difference(declaredRequirements, availableDependencies);
-      if (!extraSetters.isEmpty()) {
-        List<ExecutableElement> excessMethods =
-            declaredSetters
-                .stream()
-                .filter(method -> extraSetters.contains(method.requirement()))
-                .map(BuilderRequirementMethod::method)
-                .collect(toList());
-        Optional<DeclaredType> container =
-            Optional.of(MoreTypes.asDeclared(spec.builderDefinitionType().asType()));
+      // Requirements for modules and dependencies that the creator can set
+      Set<ComponentRequirement> creatorModuleAndDependencyRequirements =
+          creator.moduleAndDependencyRequirements();
+      // Modules and dependencies the component requires
+      Set<ComponentRequirement> componentModuleAndDependencyRequirements =
+          component.dependenciesAndConcreteModules();
+
+      // Requirements that the creator can set that don't match any requirements that the component
+      // actually has.
+      Set<ComponentRequirement> inapplicableRequirementsOnCreator =
+          Sets.difference(
+              creatorModuleAndDependencyRequirements, componentModuleAndDependencyRequirements);
+
+      if (!inapplicableRequirementsOnCreator.isEmpty()) {
+        Collection<ExecutableElement> excessElements =
+            Multimaps.filterKeys(
+                    creator.requirementElements(), in(inapplicableRequirementsOnCreator))
+                .values();
+        Optional<DeclaredType> container = Optional.of(asDeclared(creator.typeElement().asType()));
         String formatted =
-            excessMethods
-                .stream()
+            excessElements.stream()
                 .map(method -> methodSignatureFormatter.format(method, container))
                 .collect(joining(", ", "[", "]"));
         report(component)
-            .addError(String.format(msgs.extraSetters(), formatted), spec.builderDefinitionType());
+            .addError(String.format(msgs.extraSetters(), formatted), creator.typeElement());
       }
 
-      Set<ComponentRequirement> missingSetters =
-          Sets.difference(requiredDependencies, declaredRequirements);
-      if (!missingSetters.isEmpty()) {
+      // Component requirements that the creator must be able to set
+      Set<ComponentRequirement> mustBePassed =
+          Sets.filter(
+              componentModuleAndDependencyRequirements,
+              input -> input.nullPolicy(elements, types).equals(NullPolicy.THROW));
+      // Component requirements that the creator must be able to set, but can't
+      Set<ComponentRequirement> missingRequirements =
+          Sets.difference(mustBePassed, creatorModuleAndDependencyRequirements);
+
+      if (!missingRequirements.isEmpty()) {
         report(component)
             .addError(
                 String.format(
                     msgs.missingSetters(),
-                    missingSetters.stream().map(ComponentRequirement::type).collect(toList())),
-                spec.builderDefinitionType());
+                    missingRequirements.stream().map(ComponentRequirement::type).collect(toList())),
+                creator.typeElement());
       }
 
       // Validate that declared builder requirements (modules, dependencies) have unique types.
-      Map<Equivalence.Wrapper<TypeMirror>, List<ExecutableElement>> declaredRequirementsByType =
-          spec.requirementMethods()
+      ImmutableSetMultimap<Wrapper<TypeMirror>, ExecutableElement> declaredRequirementsByType =
+          Multimaps.filterKeys(
+                  creator.requirementElements(), in(creatorModuleAndDependencyRequirements))
+              .entries()
               .stream()
-              .filter(method -> !method.requirement().kind().equals(BOUND_INSTANCE))
               .collect(
-                  groupingBy(
-                      method -> method.requirement().wrappedType(),
-                      mapping(method -> method.method(), toList())));
-      for (Map.Entry<Equivalence.Wrapper<TypeMirror>, List<ExecutableElement>> entry :
-          declaredRequirementsByType.entrySet()) {
-        if (entry.getValue().size() > 1) {
-          TypeMirror type = entry.getKey().get();
-          report(component)
-              .addError(
-                  String.format(msgs.manyMethodsForType(), type, entry.getValue()),
-                  spec.builderDefinitionType());
-        }
-      }
+                  toImmutableSetMultimap(entry -> entry.getKey().wrappedType(), Entry::getValue));
+      declaredRequirementsByType
+          .asMap()
+          .forEach(
+              (typeWrapper, elementsForType) -> {
+                if (elementsForType.size() > 1) {
+                  TypeMirror type = typeWrapper.get();
+                  report(component)
+                      .addError(
+                          String.format(msgs.manyMethodsForType(), type, elementsForType),
+                          creator.typeElement());
+                }
+              });
+
+      // TODO(cgdecker): Duplicate binding validation should handle the case of multiple elements
+      // that set the same bound-instance Key, but validating that here would make it fail faster
+      // for subcomponents.
     }
 
     /**
@@ -372,7 +364,7 @@ final class ComponentDescriptorValidator {
         scopedDependencyStack.push(dependency);
         // Current scope has already appeared in the component chain.
         StringBuilder message = new StringBuilder();
-        message.append(component.componentDefinitionType().getQualifiedName());
+        message.append(component.typeElement().getQualifiedName());
         message.append(" depends on scoped components in a non-hierarchical scope ordering:\n");
         appendIndentedComponentsList(message, scopedDependencyStack);
         if (compilerOptions.scopeCycleValidationType().diagnosticKind().isPresent()) {
@@ -380,8 +372,8 @@ final class ComponentDescriptorValidator {
               .addItem(
                   message.toString(),
                   compilerOptions.scopeCycleValidationType().diagnosticKind().get(),
-                  component.componentDefinitionType(),
-                  getComponentAnnotation(component.componentDefinitionType()).get());
+                  component.typeElement(),
+                  getComponentAnnotation(component.typeElement()).get());
         }
         scopedDependencyStack.pop();
       } else {

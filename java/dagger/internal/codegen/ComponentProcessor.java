@@ -23,7 +23,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.errorprone.annotations.CheckReturnValue;
-import dagger.Binds;
 import dagger.BindsInstance;
 import dagger.Component;
 import dagger.Module;
@@ -50,11 +49,13 @@ public class ComponentProcessor extends BasicAnnotationProcessor {
   private final Optional<ImmutableSet<BindingGraphPlugin>> testingPlugins;
 
   @Inject InjectBindingRegistry injectBindingRegistry;
-  @Inject FactoryGenerator factoryGenerator;
-  @Inject MembersInjectorGenerator membersInjectorGenerator;
+  @Inject SourceFileGenerator<ProvisionBinding> factoryGenerator;
+  @Inject SourceFileGenerator<MembersInjectionBinding> membersInjectorGenerator;
   @Inject ImmutableList<ProcessingStep> processingSteps;
   @Inject BindingGraphPlugins spiPlugins;
+  @Inject CompilerOptions compilerOptions;
   @Inject @Validation BindingGraphPlugins validationPlugins;
+  @Inject DaggerStatistics daggerStatistics;
 
   public ComponentProcessor() {
     this.testingPlugins = Optional.empty();
@@ -93,7 +94,7 @@ public class ComponentProcessor extends BasicAnnotationProcessor {
     options.addAll(CompilerOptions.SUPPORTED_OPTIONS);
     options.addAll(spiPlugins.allSupportedOptions());
     options.addAll(validationPlugins.allSupportedOptions());
-    if (processingEnv.getOptions().containsKey(CompilerOptions.GRADLE_INCREMENTAL)) {
+    if (compilerOptions.useGradleIncrementalProcessing()) {
       options.add("org.gradle.annotation.processing.isolating");
     }
     return options.build();
@@ -107,6 +108,7 @@ public class ComponentProcessor extends BasicAnnotationProcessor {
         .build()
         .inject(this);
 
+    daggerStatistics.processingStarted();
     spiPlugins.initializePlugins();
     validationPlugins.initializePlugins();
     return processingSteps;
@@ -115,12 +117,14 @@ public class ComponentProcessor extends BasicAnnotationProcessor {
   @Singleton
   @Component(
       modules = {
-        ProcessingEnvironmentModule.class,
-        BindingGraphPluginsModule.class,
         BindingGraphValidationModule.class,
         BindingMethodValidatorsModule.class,
-        IncorrectlyInstalledBindsMethodsValidator.Module.class,
+        InjectBindingRegistryModule.class,
+        ProcessingEnvironmentModule.class,
         ProcessingStepsModule.class,
+        SourceFileGeneratorsModule.class,
+        SpiModule.class,
+        SystemComponentsModule.class
       })
   interface ProcessorComponent {
     void inject(ComponentProcessor processor);
@@ -147,11 +151,8 @@ public class ComponentProcessor extends BasicAnnotationProcessor {
     @Provides
     static ImmutableList<ProcessingStep> processingSteps(
         MapKeyProcessingStep mapKeyProcessingStep,
-        ForReleasableReferencesValidator forReleasableReferencesValidator,
-        CanReleaseReferencesProcessingStep canReleaseReferencesProcessingStep,
         InjectProcessingStep injectProcessingStep,
         MonitoringModuleProcessingStep monitoringModuleProcessingStep,
-        ProductionExecutorModuleProcessingStep productionExecutorModuleProcessingStep,
         MultibindingAnnotationsProcessingStep multibindingAnnotationsProcessingStep,
         BindsInstanceProcessingStep bindsInstanceProcessingStep,
         ModuleProcessingStep moduleProcessingStep,
@@ -161,27 +162,27 @@ public class ComponentProcessor extends BasicAnnotationProcessor {
         CompilerOptions compilerOptions) {
       return ImmutableList.of(
           mapKeyProcessingStep,
-          forReleasableReferencesValidator,
-          canReleaseReferencesProcessingStep,
           injectProcessingStep,
           monitoringModuleProcessingStep,
-          productionExecutorModuleProcessingStep,
           multibindingAnnotationsProcessingStep,
           bindsInstanceProcessingStep,
           moduleProcessingStep,
           compilerOptions.headerCompilation()
+                  // Ahead Of Time subcomponents use the regular hjar filtering in
+                  // HjarSourceFileGenerator since they must retain protected implementation methods
+                  // between subcomponents
+                  && !compilerOptions.aheadOfTimeSubcomponents()
               ? componentHjarProcessingStep
               : componentProcessingStep,
           bindingMethodProcessingStep);
     }
-
-    @Binds
-    InjectBindingRegistry injectBindingRegistry(InjectBindingRegistryImpl impl);
   }
 
   @Override
   protected void postRound(RoundEnvironment roundEnv) {
-    if (!roundEnv.processingOver()) {
+    if (roundEnv.processingOver()) {
+      daggerStatistics.processingStopped();
+    } else {
       try {
         injectBindingRegistry.generateSourcesForRequiredBindings(
             factoryGenerator, membersInjectorGenerator);

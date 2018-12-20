@@ -17,6 +17,7 @@
 package dagger.internal.codegen;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
 
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
@@ -28,15 +29,15 @@ import java.util.Optional;
 /** An {@link Producer} creation expression for provision bindings. */
 final class ProducerFromProviderCreationExpression implements FrameworkInstanceCreationExpression {
   private final ContributionBinding binding;
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
   private final ComponentBindingExpressions componentBindingExpressions;
 
   ProducerFromProviderCreationExpression(
       ContributionBinding binding,
-      GeneratedComponentModel generatedComponentModel,
+      ComponentImplementation componentImplementation,
       ComponentBindingExpressions componentBindingExpressions) {
     this.binding = checkNotNull(binding);
-    this.generatedComponentModel = checkNotNull(generatedComponentModel);
+    this.componentImplementation = checkNotNull(componentImplementation);
     this.componentBindingExpressions = checkNotNull(componentBindingExpressions);
   }
 
@@ -46,8 +47,8 @@ final class ProducerFromProviderCreationExpression implements FrameworkInstanceC
         RequestKind.PRODUCER,
         componentBindingExpressions
             .getDependencyExpression(
-                FrameworkDependency.create(binding.key(), FrameworkType.PROVIDER),
-                generatedComponentModel.name())
+                bindingRequest(binding.key(), FrameworkType.PROVIDER),
+                componentImplementation.name())
             .codeBlock());
   }
 

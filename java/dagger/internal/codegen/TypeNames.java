@@ -31,14 +31,12 @@ import dagger.internal.MapFactory;
 import dagger.internal.MapProviderFactory;
 import dagger.internal.MembersInjectors;
 import dagger.internal.ProviderOfLazy;
-import dagger.internal.ReferenceReleasingProvider;
-import dagger.internal.ReferenceReleasingProviderManager;
 import dagger.internal.SetFactory;
 import dagger.internal.SingleCheck;
-import dagger.internal.TypedReleasableReferenceManagerDecorator;
 import dagger.producers.Produced;
 import dagger.producers.Producer;
 import dagger.producers.internal.AbstractProducer;
+import dagger.producers.internal.DependencyMethodProducer;
 import dagger.producers.internal.MapOfProducedProducer;
 import dagger.producers.internal.MapOfProducerProducer;
 import dagger.producers.internal.MapProducer;
@@ -60,6 +58,7 @@ final class TypeNames {
 
   static final ClassName ABSTRACT_PRODUCER = ClassName.get(AbstractProducer.class);
   static final ClassName ASYNC_FUNCTION = ClassName.get(AsyncFunction.class);
+  static final ClassName DEPENDENCY_METHOD_PRODUCER = ClassName.get(DependencyMethodProducer.class);
   static final ClassName DOUBLE_CHECK = ClassName.get(DoubleCheck.class);
   static final ClassName EXECUTOR = ClassName.get(Executor.class);
   static final ClassName FACTORY = ClassName.get(Factory.class);
@@ -85,17 +84,11 @@ final class TypeNames {
   static final ClassName PROVIDER = ClassName.get(Provider.class);
   static final ClassName PROVIDER_OF_LAZY = ClassName.get(ProviderOfLazy.class);
   static final ClassName RUNNABLE = ClassName.get(Runnable.class);
-  static final ClassName REFERENCE_RELEASING_PROVIDER =
-      ClassName.get(ReferenceReleasingProvider.class);
-  static final ClassName REFERENCE_RELEASING_PROVIDER_MANAGER =
-      ClassName.get(ReferenceReleasingProviderManager.class);
   static final ClassName SET = ClassName.get(Set.class);
   static final ClassName SET_FACTORY = ClassName.get(SetFactory.class);
   static final ClassName SET_OF_PRODUCED_PRODUCER = ClassName.get(SetOfProducedProducer.class);
   static final ClassName SET_PRODUCER = ClassName.get(SetProducer.class);
   static final ClassName SINGLE_CHECK = ClassName.get(SingleCheck.class);
-  static final ClassName TYPED_RELEASABLE_REFERENCE_MANAGER_DECORATOR =
-      ClassName.get(TypedReleasableReferenceManagerDecorator.class);
 
   /**
    * {@link TypeName#VOID} is lowercase-v {@code void} whereas this represents the class, {@link
@@ -137,6 +130,10 @@ final class TypeNames {
 
   static ParameterizedTypeName producerOf(TypeName typeName) {
     return ParameterizedTypeName.get(PRODUCER, typeName);
+  }
+
+  static ParameterizedTypeName dependencyMethodProducerOf(TypeName typeName) {
+    return ParameterizedTypeName.get(DEPENDENCY_METHOD_PRODUCER, typeName);
   }
 
   static ParameterizedTypeName providerOf(TypeName typeName) {

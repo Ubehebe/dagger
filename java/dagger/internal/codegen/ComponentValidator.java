@@ -18,17 +18,19 @@ package dagger.internal.codegen;
 
 import static com.google.auto.common.MoreElements.asType;
 import static com.google.auto.common.MoreElements.getLocalAndInheritedMethods;
+import static com.google.auto.common.MoreElements.isAnnotationPresent;
 import static com.google.auto.common.MoreTypes.asDeclared;
 import static com.google.auto.common.MoreTypes.asExecutable;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.Multimaps.asMap;
-import static dagger.internal.codegen.ConfigurationAnnotations.enclosedBuilders;
+import static dagger.internal.codegen.ConfigurationAnnotations.enclosedAnnotatedTypes;
 import static dagger.internal.codegen.ConfigurationAnnotations.getComponentDependencies;
 import static dagger.internal.codegen.ConfigurationAnnotations.getComponentModules;
 import static dagger.internal.codegen.ConfigurationAnnotations.getModuleAnnotation;
 import static dagger.internal.codegen.ConfigurationAnnotations.getTransitiveModules;
 import static dagger.internal.codegen.DaggerElements.getAnnotationMirror;
 import static dagger.internal.codegen.DaggerElements.getAnyAnnotation;
+import static dagger.internal.codegen.DaggerStreams.presentValues;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
 import static java.util.Comparator.comparing;
 import static javax.lang.model.element.ElementKind.CLASS;
@@ -37,10 +39,8 @@ import static javax.lang.model.element.Modifier.ABSTRACT;
 import static javax.lang.model.type.TypeKind.VOID;
 import static javax.lang.model.util.ElementFilter.methodsIn;
 
-import com.google.auto.common.MoreElements;
 import com.google.auto.common.MoreTypes;
 import com.google.auto.value.AutoValue;
-import com.google.common.collect.FluentIterable;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -51,9 +51,10 @@ import com.google.common.collect.SetMultimap;
 import com.google.common.collect.Sets;
 import dagger.Component;
 import dagger.Reusable;
-import dagger.internal.codegen.ComponentDescriptor.Kind;
+import dagger.internal.codegen.ErrorMessages.SubcomponentCreatorMessages;
 import dagger.model.DependencyRequest;
 import dagger.model.Key;
+import dagger.producers.CancellationPolicy;
 import dagger.producers.ProductionComponent;
 import java.lang.annotation.Annotation;
 import java.util.Collection;
@@ -81,7 +82,7 @@ final class ComponentValidator {
   private final DaggerElements elements;
   private final Types types;
   private final ModuleValidator moduleValidator;
-  private final BuilderValidator builderValidator;
+  private final ComponentCreatorValidator creatorValidator;
   private final DependencyRequestValidator dependencyRequestValidator;
   private final MembersInjectionValidator membersInjectionValidator;
   private final MethodSignatureFormatter methodSignatureFormatter;
@@ -92,7 +93,7 @@ final class ComponentValidator {
       DaggerElements elements,
       Types types,
       ModuleValidator moduleValidator,
-      BuilderValidator builderValidator,
+      ComponentCreatorValidator creatorValidator,
       DependencyRequestValidator dependencyRequestValidator,
       MembersInjectionValidator membersInjectionValidator,
       MethodSignatureFormatter methodSignatureFormatter,
@@ -100,7 +101,7 @@ final class ComponentValidator {
     this.elements = elements;
     this.types = types;
     this.moduleValidator = moduleValidator;
-    this.builderValidator = builderValidator;
+    this.creatorValidator = creatorValidator;
     this.dependencyRequestValidator = dependencyRequestValidator;
     this.membersInjectionValidator = membersInjectionValidator;
     this.methodSignatureFormatter = methodSignatureFormatter;
@@ -121,26 +122,34 @@ final class ComponentValidator {
   public ComponentValidationReport validate(
       final TypeElement subject,
       Set<? extends Element> validatedSubcomponents,
-      Set<? extends Element> validatedSubcomponentBuilders) {
+      Set<? extends Element> validatedSubcomponentCreators) {
     ValidationReport.Builder<TypeElement> report = ValidationReport.about(subject);
 
-    ComponentDescriptor.Kind componentKind =
-        ComponentDescriptor.Kind.forAnnotatedElement(subject).get();
+    ComponentKind componentKind = ComponentKind.forAnnotatedElement(subject).get();
+
+    if (isAnnotationPresent(subject, CancellationPolicy.class) && !componentKind.isProducer()) {
+      report.addError(
+          "@CancellationPolicy may only be applied to production components and subcomponents",
+          subject);
+    }
 
     if (!subject.getKind().equals(INTERFACE)
         && !(subject.getKind().equals(CLASS) && subject.getModifiers().contains(ABSTRACT))) {
       report.addError(
           String.format(
               "@%s may only be applied to an interface or abstract class",
-              componentKind.annotationType().getSimpleName()),
+              componentKind.annotation().getSimpleName()),
           subject);
     }
 
     ImmutableList<DeclaredType> builders =
-        enclosedBuilders(subject, componentKind.builderAnnotationType());
+        componentKind
+            .builderAnnotation()
+            .map(builderAnnotation -> enclosedAnnotatedTypes(subject, builderAnnotation))
+            .orElse(ImmutableList.of());
     if (builders.size() > 1) {
       report.addError(
-          String.format(ErrorMessages.builderMsgsFor(componentKind).moreThanOne(), builders),
+          String.format(ErrorMessages.creatorMessagesFor(componentKind).moreThanOne(), builders),
           subject);
     }
 
@@ -173,22 +182,21 @@ final class ComponentValidator {
               Optional<AnnotationMirror> subcomponentAnnotation =
                   checkForAnnotations(
                       returnType,
-                      FluentIterable.from(componentKind.subcomponentKinds())
-                          .transform(Kind::annotationType)
-                          .toSet());
+                      componentKind.legalSubcomponentKinds().stream()
+                          .map(ComponentKind::annotation)
+                          .collect(toImmutableSet()));
               Optional<AnnotationMirror> subcomponentBuilderAnnotation =
                   checkForAnnotations(
                       returnType,
-                      FluentIterable.from(componentKind.subcomponentKinds())
-                          .transform(Kind::builderAnnotationType)
-                          .toSet());
+                      componentKind.legalSubcomponentKinds().stream()
+                          .map(ComponentKind::builderAnnotation)
+                          .flatMap(presentValues())
+                          .collect(toImmutableSet()));
               if (subcomponentAnnotation.isPresent()) {
                 referencedSubcomponents.put(MoreTypes.asElement(returnType), method);
                 validateSubcomponentMethod(
                     report,
-                    ComponentDescriptor.Kind.forAnnotatedElement(
-                            MoreTypes.asTypeElement(returnType))
-                        .get(),
+                    ComponentKind.forAnnotatedElement(MoreTypes.asTypeElement(returnType)).get(),
                     method,
                     parameters,
                     parameterTypes,
@@ -197,8 +205,8 @@ final class ComponentValidator {
               } else if (subcomponentBuilderAnnotation.isPresent()) {
                 referencedSubcomponents.put(
                     MoreTypes.asElement(returnType).getEnclosingElement(), method);
-                validateSubcomponentBuilderMethod(
-                    report, method, parameters, returnType, validatedSubcomponentBuilders);
+                validateSubcomponentCreatorMethod(
+                    report, method, parameters, returnType, validatedSubcomponentCreators);
               } else {
                 // if it's not a subcomponent...
                 switch (parameters.size()) {
@@ -238,20 +246,19 @@ final class ComponentValidator {
             (subcomponent, methods) ->
                 report.addError(
                     String.format(
-                        ErrorMessages.SubcomponentBuilderMessages.INSTANCE
-                            .moreThanOneRefToSubcomponent(),
+                        SubcomponentCreatorMessages.INSTANCE.moreThanOneRefToSubcomponent(),
                         subcomponent,
                         methods),
                     subject));
 
     AnnotationMirror componentMirror =
-        getAnnotationMirror(subject, componentKind.annotationType()).get();
+        getAnnotationMirror(subject, componentKind.annotation()).get();
     if (componentKind.isTopLevel()) {
       validateComponentDependencies(report, getComponentDependencies(componentMirror));
     }
     report.addSubreport(
         moduleValidator.validateReferencedModules(
-            subject, componentMirror, componentKind.moduleKinds(), new HashSet<>()));
+            subject, componentMirror, componentKind.legalModuleKinds(), new HashSet<>()));
 
     // Make sure we validate any subcomponents we're referencing, unless we know we validated
     // them already in this pass.
@@ -263,7 +270,7 @@ final class ComponentValidator {
     for (Element subcomponent :
         Sets.difference(referencedSubcomponents.keySet(), validatedSubcomponents)) {
       ComponentValidationReport subreport =
-          validate(asType(subcomponent), validatedSubcomponents, validatedSubcomponentBuilders);
+          validate(asType(subcomponent), validatedSubcomponents, validatedSubcomponentCreators);
       report.addItems(subreport.report().items());
       allSubcomponents.addAll(subreport.referencedSubcomponents());
     }
@@ -313,7 +320,7 @@ final class ComponentValidator {
   private DependencyRequest dependencyRequest(ExecutableElement method, TypeElement component) {
     ExecutableType methodType =
         asExecutable(types.asMemberOf(asDeclared(component.asType()), method));
-    return ComponentDescriptor.Kind.forAnnotatedElement(component).get().isProducer()
+    return ComponentKind.forAnnotatedElement(component).get().isProducer()
         ? dependencyRequestFactory.forComponentProductionMethod(method, methodType)
         : dependencyRequestFactory.forComponentProvisionMethod(method, methodType);
   }
@@ -356,7 +363,7 @@ final class ComponentValidator {
 
   private void validateSubcomponentMethod(
       final ValidationReport.Builder<TypeElement> report,
-      final ComponentDescriptor.Kind subcomponentKind,
+      final ComponentKind subcomponentKind,
       ExecutableElement method,
       List<? extends VariableElement> parameters,
       List<? extends TypeMirror> parameterTypes,
@@ -387,9 +394,8 @@ final class ComponentValidator {
 
                 @Override
                 public Optional<TypeElement> visitDeclared(DeclaredType t, Void p) {
-                  for (ModuleDescriptor.Kind moduleKind : subcomponentKind.moduleKinds()) {
-                    if (MoreElements.isAnnotationPresent(
-                        t.asElement(), moduleKind.moduleAnnotation())) {
+                  for (ModuleKind moduleKind : subcomponentKind.legalModuleKinds()) {
+                    if (isAnnotationPresent(t.asElement(), moduleKind.annotation())) {
                       return Optional.of(MoreTypes.asTypeElement(t));
                     }
                   }
@@ -426,25 +432,24 @@ final class ComponentValidator {
     }
   }
 
-  private void validateSubcomponentBuilderMethod(
+  private void validateSubcomponentCreatorMethod(
       ValidationReport.Builder<TypeElement> report,
       ExecutableElement method,
       List<? extends VariableElement> parameters,
       TypeMirror returnType,
-      Set<? extends Element> validatedSubcomponentBuilders) {
+      Set<? extends Element> validatedSubcomponentCreators) {
 
     if (!parameters.isEmpty()) {
-      report.addError(
-          ErrorMessages.SubcomponentBuilderMessages.INSTANCE.builderMethodRequiresNoArgs(), method);
+      report.addError(SubcomponentCreatorMessages.INSTANCE.builderMethodRequiresNoArgs(), method);
     }
 
-    // If we haven't already validated the subcomponent builder itself, validate it now.
-    TypeElement builderElement = MoreTypes.asTypeElement(returnType);
-    if (!validatedSubcomponentBuilders.contains(builderElement)) {
-      // TODO(sameb): The builder validator right now assumes the element is being compiled
+    // If we haven't already validated the subcomponent creator itself, validate it now.
+    TypeElement creatorElement = MoreTypes.asTypeElement(returnType);
+    if (!validatedSubcomponentCreators.contains(creatorElement)) {
+      // TODO(sameb): The creator validator right now assumes the element is being compiled
       // in this pass, which isn't true here.  We should change error messages to spit out
       // this method as the subject and add the original subject to the message output.
-      report.addItems(builderValidator.validate(builderElement).items());
+      report.addItems(creatorValidator.validate(creatorElement).items());
     }
   }
 

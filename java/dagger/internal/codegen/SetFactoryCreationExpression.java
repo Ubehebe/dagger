@@ -20,34 +20,31 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static dagger.internal.codegen.SourceFiles.setFactoryClassName;
 
 import com.squareup.javapoet.CodeBlock;
-import dagger.internal.codegen.FrameworkFieldInitializer.FrameworkInstanceCreationExpression;
 import dagger.producers.Produced;
+import java.util.Optional;
 
 /** A factory creation expression for a multibound set. */
-// TODO(dpb): Resolve with MapFactoryCreationExpression.
-final class SetFactoryCreationExpression implements FrameworkInstanceCreationExpression {
+final class SetFactoryCreationExpression extends MultibindingFactoryCreationExpression {
 
-  private final GeneratedComponentModel generatedComponentModel;
-  private final ComponentBindingExpressions componentBindingExpressions;
+  private final ComponentImplementation componentImplementation;
   private final BindingGraph graph;
   private final ContributionBinding binding;
 
   SetFactoryCreationExpression(
       ContributionBinding binding,
-      GeneratedComponentModel generatedComponentModel,
+      ComponentImplementation componentImplementation,
       ComponentBindingExpressions componentBindingExpressions,
       BindingGraph graph) {
+    super(binding, componentImplementation, componentBindingExpressions);
     this.binding = checkNotNull(binding);
-    this.generatedComponentModel = checkNotNull(generatedComponentModel);
-    this.componentBindingExpressions = checkNotNull(componentBindingExpressions);
+    this.componentImplementation = checkNotNull(componentImplementation);
     this.graph = checkNotNull(graph);
   }
 
   @Override
   public CodeBlock creationExpression() {
     CodeBlock.Builder builder = CodeBlock.builder().add("$T.", setFactoryClassName(binding));
-    boolean useRawType = !generatedComponentModel.isTypeAccessible(binding.key().type());
-    if (!useRawType) {
+    if (!useRawType()) {
       SetType setType = SetType.from(binding.key());
       builder.add(
           "<$T>",
@@ -55,43 +52,51 @@ final class SetFactoryCreationExpression implements FrameworkInstanceCreationExp
               ? setType.unwrappedElementType(Produced.class)
               : setType.elementType());
     }
+
     int individualProviders = 0;
     int setProviders = 0;
     CodeBlock.Builder builderMethodCalls = CodeBlock.builder();
-    for (FrameworkDependency frameworkDependency : binding.frameworkDependencies()) {
+    String methodNameSuffix =
+        binding.bindingType().equals(BindingType.PROVISION) ? "Provider" : "Producer";
+
+    Optional<CodeBlock> superContributions = superContributions();
+    if (superContributions.isPresent()) {
+      // TODO(b/117833324): consider decomposing the Provider<Set<Provider>> and adding the
+      // individual contributions separately from the collection contributions. Though this may
+      // actually not be doable/desirable if the super provider instance is a DelegateFactory or
+      // another internal type that is not SetFactory
+      builderMethodCalls.add(".addCollection$N($L)", methodNameSuffix, superContributions.get());
+      setProviders++;
+    }
+
+    for (FrameworkDependency frameworkDependency : frameworkDependenciesToImplement()) {
       ContributionType contributionType =
           graph.contributionBindings().get(frameworkDependency.key()).contributionType();
-      String methodName;
-      String methodNameSuffix = frameworkDependency.frameworkClass().getSimpleName();
+      String methodNamePrefix;
       switch (contributionType) {
         case SET:
           individualProviders++;
-          methodName = "add" + methodNameSuffix;
+          methodNamePrefix = "add";
           break;
         case SET_VALUES:
           setProviders++;
-          methodName = "addCollection" + methodNameSuffix;
+          methodNamePrefix = "addCollection";
           break;
         default:
           throw new AssertionError(frameworkDependency + " is not a set multibinding");
       }
 
-      CodeBlock argument =
-          componentBindingExpressions
-              .getDependencyExpression(frameworkDependency, generatedComponentModel.name())
-              .codeBlock();
       builderMethodCalls.add(
-          ".$L($L)",
-          methodName,
-          useRawType ? CodeBlocks.cast(argument, frameworkDependency.frameworkClass()) : argument);
+          ".$N$N($L)",
+          methodNamePrefix,
+          methodNameSuffix,
+          multibindingDependencyExpression(frameworkDependency));
     }
     builder.add("builder($L, $L)", individualProviders, setProviders);
     builder.add(builderMethodCalls.build());
-    return builder.add(".build()").build();
-  }
 
-  @Override
-  public boolean useInnerSwitchingProvider() {
-    return !binding.dependencies().isEmpty();
+    componentImplementation.registerImplementedMultibinding(binding, bindingRequest());
+
+    return builder.add(".build()").build();
   }
 }

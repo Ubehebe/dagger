@@ -20,11 +20,10 @@ import static com.google.auto.common.MoreElements.getPackage;
 import static com.google.auto.common.MoreElements.isAnnotationPresent;
 import static com.google.common.base.CaseFormat.LOWER_CAMEL;
 import static com.google.common.base.CaseFormat.UPPER_CAMEL;
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.Iterables.transform;
 import static dagger.internal.codegen.ConfigurationAnnotations.getModuleAnnotation;
 import static dagger.internal.codegen.ConfigurationAnnotations.getModuleIncludes;
-import static dagger.internal.codegen.DaggerElements.getAnnotationMirror;
 import static dagger.internal.codegen.DaggerElements.isAnnotationPresent;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
 import static dagger.internal.codegen.SourceFiles.classFileName;
@@ -36,21 +35,21 @@ import com.google.auto.common.MoreElements;
 import com.google.auto.common.MoreTypes;
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
+import com.google.common.graph.Traverser;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.squareup.javapoet.ClassName;
 import dagger.Binds;
 import dagger.BindsOptionalOf;
 import dagger.Module;
 import dagger.Provides;
+import dagger.model.Key;
 import dagger.multibindings.Multibinds;
-import dagger.producers.ProducerModule;
 import dagger.producers.Produces;
-import java.lang.annotation.Annotation;
-import java.util.EnumSet;
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 import javax.inject.Inject;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.ExecutableElement;
@@ -78,63 +77,20 @@ abstract class ModuleDescriptor {
   /** The {@link BindsOptionalOf} method declarations that define optional bindings. */
   abstract ImmutableSet<OptionalBindingDeclaration> optionalDeclarations();
 
-  abstract Kind kind();
+  /** The kind of the module. */
+  abstract ModuleKind kind();
 
-  enum Kind {
-    MODULE(Module.class, Provides.class),
-    PRODUCER_MODULE(ProducerModule.class, Produces.class);
-
-    private final Class<? extends Annotation> moduleAnnotation;
-    private final Class<? extends Annotation> methodAnnotation;
-
-    /**
-     * Returns the kind of an annotated element if it is annotated with one of the {@linkplain
-     * #moduleAnnotation() annotation types}.
-     *
-     * @throws IllegalArgumentException if the element is annotated with more than one of the
-     *     annotation types
-     */
-    static Optional<Kind> forAnnotatedElement(TypeElement element) {
-      Set<Kind> kinds = EnumSet.noneOf(Kind.class);
-      for (Kind kind : values()) {
-        if (MoreElements.isAnnotationPresent(element, kind.moduleAnnotation())) {
-          kinds.add(kind);
-        }
-      }
-      checkArgument(
-          kinds.size() <= 1, "%s cannot be annotated with more than one of %s", element, kinds);
-      return kinds.stream().findFirst();
-    }
-
-    Kind(
-        Class<? extends Annotation> moduleAnnotation,
-        Class<? extends Annotation> methodAnnotation) {
-      this.moduleAnnotation = moduleAnnotation;
-      this.methodAnnotation = methodAnnotation;
-    }
-
-    Optional<AnnotationMirror> getModuleAnnotationMirror(TypeElement element) {
-      return getAnnotationMirror(element, moduleAnnotation);
-    }
-
-    Class<? extends Annotation> moduleAnnotation() {
-      return moduleAnnotation;
-    }
-
-    Class<? extends Annotation> methodAnnotation() {
-      return methodAnnotation;
-    }
-
-    ImmutableSet<Kind> includesKinds() {
-      switch (this) {
-        case MODULE:
-          return Sets.immutableEnumSet(MODULE);
-        case PRODUCER_MODULE:
-          return Sets.immutableEnumSet(MODULE, PRODUCER_MODULE);
-        default:
-          throw new AssertionError(this);
-      }
-    }
+  /** Returns the keys of all bindings declared by this module. */
+  ImmutableSet<Key> allBindingKeys() {
+    return Stream.of(
+            bindings(),
+            delegateDeclarations(),
+            multibindingDeclarations(),
+            optionalDeclarations(),
+            subcomponentDeclarations())
+        .flatMap(Collection::stream)
+        .map(BindingDeclaration::key)
+        .collect(toImmutableSet());
   }
 
   static final class Factory {
@@ -197,7 +153,15 @@ abstract class ModuleDescriptor {
           subcomponentDeclarationFactory.forModule(moduleElement),
           delegates.build(),
           optionalDeclarations.build(),
-          Kind.forAnnotatedElement(moduleElement).get());
+          ModuleKind.forAnnotatedElement(moduleElement).get());
+    }
+
+    /** Returns all the modules transitively included by given modules, including the arguments. */
+    ImmutableSet<ModuleDescriptor> transitiveModules(Iterable<TypeElement> modules) {
+      return ImmutableSet.copyOf(
+          Traverser.forGraph(
+                  (ModuleDescriptor module) -> transform(module.includedModules(), this::create))
+              .depthFirstPreOrder(transform(modules, this::create)));
     }
 
     @CanIgnoreReturnValue

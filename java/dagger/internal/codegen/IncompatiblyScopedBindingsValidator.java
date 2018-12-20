@@ -19,6 +19,7 @@ package dagger.internal.codegen;
 import static dagger.internal.codegen.DaggerElements.closestEnclosingTypeElement;
 import static dagger.internal.codegen.Formatter.INDENT;
 import static dagger.internal.codegen.Scopes.getReadableSource;
+import static dagger.model.BindingKind.INJECTION;
 import static java.util.stream.Collectors.joining;
 import static javax.tools.Diagnostic.Kind.ERROR;
 
@@ -27,12 +28,13 @@ import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.Multimaps;
 import dagger.model.Binding;
 import dagger.model.BindingGraph;
-import dagger.model.BindingGraph.BindingNode;
 import dagger.model.BindingGraph.ComponentNode;
 import dagger.spi.BindingGraphPlugin;
 import dagger.spi.DiagnosticReporter;
+import java.util.Optional;
 import java.util.Set;
 import javax.inject.Inject;
+import javax.tools.Diagnostic;
 
 /**
  * Reports an error for any component that uses bindings with scopes that are not assigned to the
@@ -41,10 +43,13 @@ import javax.inject.Inject;
 final class IncompatiblyScopedBindingsValidator implements BindingGraphPlugin {
 
   private final MethodSignatureFormatter methodSignatureFormatter;
+  private final CompilerOptions compilerOptions;
 
   @Inject
-  IncompatiblyScopedBindingsValidator(MethodSignatureFormatter methodSignatureFormatter) {
+  IncompatiblyScopedBindingsValidator(
+      MethodSignatureFormatter methodSignatureFormatter, CompilerOptions compilerOptions) {
     this.methodSignatureFormatter = methodSignatureFormatter;
+    this.compilerOptions = compilerOptions;
   }
 
   @Override
@@ -54,51 +59,65 @@ final class IncompatiblyScopedBindingsValidator implements BindingGraphPlugin {
 
   @Override
   public void visitGraph(BindingGraph bindingGraph, DiagnosticReporter diagnosticReporter) {
-    ImmutableSetMultimap.Builder<ComponentNode, BindingNode> incompatibleBindingNodes =
+    ImmutableSetMultimap.Builder<ComponentNode, dagger.model.Binding> incompatibleBindings =
         ImmutableSetMultimap.builder();
-    for (BindingNode bindingNode : bindingGraph.bindingNodes()) {
-      bindingNode
-          .binding()
+    for (dagger.model.Binding binding : bindingGraph.bindings()) {
+      binding
           .scope()
+          .filter(scope -> !scope.isReusable())
           .ifPresent(
               scope -> {
-                if (scope.isReusable()) {
-                  return;
-                }
                 ComponentNode componentNode =
-                    bindingGraph.componentNode(bindingNode.componentPath()).get();
+                    bindingGraph.componentNode(binding.componentPath()).get();
                 if (!componentNode.scopes().contains(scope)) {
-                  incompatibleBindingNodes.put(componentNode, bindingNode);
+                  // @Inject bindings in module binding graphs will appear at the properly scoped
+                  // ancestor component, so ignore them here.
+                  if (binding.kind().equals(INJECTION) && bindingGraph.isModuleBindingGraph()) {
+                    return;
+                  }
+                  incompatibleBindings.put(componentNode, binding);
                 }
               });
     }
-    Multimaps.asMap(incompatibleBindingNodes.build())
+    Multimaps.asMap(incompatibleBindings.build())
         .forEach(
-            (componentNode, bindingNodes) ->
-                diagnosticReporter.reportComponent(
-                    ERROR,
-                    componentNode,
-                    incompatibleBindingScopesError(componentNode, bindingNodes)));
+            (componentNode, bindings) ->
+                report(componentNode, bindings, bindingGraph, diagnosticReporter));
   }
 
-  private String incompatibleBindingScopesError(
-      ComponentNode componentNode, Set<BindingNode> bindingNodes) {
+  private void report(
+      ComponentNode componentNode,
+      Set<Binding> bindings,
+      BindingGraph bindingGraph,
+      DiagnosticReporter diagnosticReporter) {
+    Diagnostic.Kind diagnosticKind = ERROR;
     StringBuilder message =
         new StringBuilder(componentNode.componentPath().currentComponent().getQualifiedName());
-    if (!componentNode.scopes().isEmpty()) {
+
+    if (bindingGraph.isModuleBindingGraph() && componentNode.componentPath().atRoot()) {
+      // The root "component" of a module binding graph is a module, which will have no scopes
+      // attached. We want to report if there is more than one scope in that component.
+      if (bindings.stream().map(Binding::scope).map(Optional::get).distinct().count() <= 1) {
+        return;
+      }
+      message.append(" contains bindings with different scopes:");
+      diagnosticKind = compilerOptions.moduleHasDifferentScopesDiagnosticKind();
+    } else if (componentNode.scopes().isEmpty()) {
+      message.append(" (unscoped) may not reference scoped bindings:");
+    } else {
       message
           .append(" scoped with ")
           .append(
               componentNode.scopes().stream().map(Scopes::getReadableSource).collect(joining(" ")))
-          .append(" may not reference bindings with different scopes:\n");
-    } else {
-      message.append(" (unscoped) may not reference scoped bindings:\n");
+          .append(" may not reference bindings with different scopes:");
     }
-    // TODO(ronshapiro): Should we group by scope?
-    for (BindingNode bindingNode : bindingNodes) {
-      message.append(INDENT);
 
-      Binding binding = bindingNode.binding();
+    // TODO(ronshapiro): Should we group by scope?
+    for (Binding binding : bindings) {
+      message.append('\n').append(INDENT);
+
+      // TODO(dpb): Use BindingDeclarationFormatter.
+      // But that doesn't print scopes for @Inject-constructed types.
       switch (binding.kind()) {
         case DELEGATE:
         case PROVISION:
@@ -116,11 +135,9 @@ final class IncompatiblyScopedBindingsValidator implements BindingGraphPlugin {
           break;
 
         default:
-          throw new AssertionError(bindingNode);
+          throw new AssertionError(binding);
       }
-
-      message.append("\n");
     }
-    return message.toString();
+    diagnosticReporter.reportComponent(diagnosticKind, componentNode, message.toString());
   }
 }

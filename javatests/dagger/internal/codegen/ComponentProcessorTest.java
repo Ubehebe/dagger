@@ -27,22 +27,17 @@ import static dagger.internal.codegen.GeneratedLines.NPE_FROM_COMPONENT_METHOD;
 import static dagger.internal.codegen.GeneratedLines.NPE_FROM_PROVIDES_METHOD;
 
 import com.google.auto.common.MoreElements;
-import com.google.common.base.Joiner;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import com.google.testing.compile.Compilation;
 import com.google.testing.compile.JavaFileObjects;
 import dagger.MembersInjector;
-import java.io.IOException;
-import java.io.Writer;
 import java.lang.annotation.Annotation;
 import java.util.Collection;
 import java.util.Set;
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.ProcessingEnvironment;
-import javax.annotation.processing.Processor;
 import javax.annotation.processing.RoundEnvironment;
 import javax.inject.Inject;
 import javax.lang.model.SourceVersion;
@@ -385,7 +380,7 @@ public class ComponentProcessorTest {
                 "    @Override",
                 "    public T get() {",
                 "      switch (id) {",
-                "        case 0: return (T) someInjectableType();",
+                "        case 0: return (T) DaggerSimpleComponent.this.someInjectableType();",
                 "        default: throw new AssertionError(id);",
                 "      }",
                 "    }",
@@ -515,13 +510,12 @@ public class ComponentProcessorTest {
                 "public final class DaggerTestComponent implements TestComponent {",
                 "  private TestModule testModule;",
                 "",
-                "  private B getB() {",
-                "    return TestModule_BFactory.proxyB(testModule, new C());",
+                "  private DaggerTestComponent(Builder builder) {",
+                "    this.testModule = builder.testModule;",
                 "  }",
                 "",
-                "  @SuppressWarnings(\"unchecked\")",
-                "  private void initialize(final Builder builder) {",
-                "    this.testModule = builder.testModule;",
+                "  private B getB() {",
+                "    return TestModule_BFactory.proxyB(testModule, new C());",
                 "  }",
                 "",
                 "  @Override",
@@ -1213,6 +1207,10 @@ public class ComponentProcessorTest {
                 "  private volatile Provider<A> aProvider;",
                 "  private AComponent aComponent;",
                 "",
+                "  private DaggerBComponent(Builder builder) {",
+                "    this.aComponent = builder.aComponent;",
+                "  }",
+                "",
                 "  private Provider<A> getAProvider() {",
                 "    Object local = aProvider;",
                 "    if (local == null) {",
@@ -1221,17 +1219,13 @@ public class ComponentProcessorTest {
                 "    }",
                 "    return (Provider<A>) local;",
                 "  }")
-            .addLines(
-                "  @SuppressWarnings(\"unchecked\")",
-                "  private void initialize(final Builder builder) {")
             .addLinesIn(
                 DEFAULT_MODE,
-                "    this.aProvider = new test_AComponent_a(builder.aComponent);")
-            .addLinesIn(
-                FAST_INIT_MODE,
-                "    this.aComponent = builder.aComponent;")
+                "  @SuppressWarnings(\"unchecked\")",
+                "  private void initialize(final Builder builder) {",
+                "    this.aProvider = new test_AComponent_a(builder.aComponent);",
+                "  }")
             .addLines(
-                "  }",
                 "",
                 "  @Override",
                 "  public B b() {")
@@ -1248,10 +1242,7 @@ public class ComponentProcessorTest {
                 "    private AComponent aComponent;",
                 "",
                 "    public BComponent build() {",
-                "      if (aComponent == null) {",
-                "        throw new IllegalStateException(AComponent.class.getCanonicalName()",
-                "            + \" must be set\");",
-                "      }",
+                "      Preconditions.checkBuilderRequirement(aComponent, AComponent.class);",
                 "      return new DaggerBComponent(this);",
                 "    }",
                 "",
@@ -1286,7 +1277,8 @@ public class ComponentProcessorTest {
                 "        case 0:",
                 "          return (T)",
                 "              Preconditions.checkNotNull(",
-                "                  aComponent.a(), " + NPE_FROM_COMPONENT_METHOD + ");",
+                "                  DaggerBComponent.this.aComponent.a(),",
+                "                  " + NPE_FROM_COMPONENT_METHOD + ");",
                 "        default:",
                 "          throw new AssertionError(id);",
                 "      }",
@@ -1355,8 +1347,7 @@ public class ComponentProcessorTest {
             "  private TestModule testModule;",
             "  private other.test.TestModule testModule2;",
             "",
-            "  @SuppressWarnings(\"unchecked\")",
-            "  private void initialize(final Builder builder) {",
+            "  private DaggerTestComponent(Builder builder) {",
             "    this.testModule = builder.testModule;",
             "    this.testModule2 = builder.testModule2;",
             "  }",
@@ -1479,8 +1470,7 @@ public class ComponentProcessorTest {
             "public final class DaggerBComponent implements BComponent {",
             "  private AComponent aComponent;",
             "",
-            "  @SuppressWarnings(\"unchecked\")",
-            "  private void initialize(final Builder builder) {",
+            "  private DaggerBComponent(Builder builder) {",
             "    this.aComponent = builder.aComponent;",
             "  }",
             "",
@@ -2580,39 +2570,6 @@ public class ComponentProcessorTest {
               return roundEnv.errorRaised();
             }
           });
-    }
-  }
-
-  /**
-   * A simple {@link Processor} that generates one source file.
-   */
-  private static final class GeneratingProcessor extends AbstractProcessor {
-    private final String generatedClassName;
-    private final String generatedSource;
-    private boolean processed;
-
-    GeneratingProcessor(String generatedClassName, String... source) {
-      this.generatedClassName = generatedClassName;
-      this.generatedSource = Joiner.on("\n").join(source);
-    }
-
-    @Override
-    public Set<String> getSupportedAnnotationTypes() {
-      return ImmutableSet.of("*");
-    }
-
-    @Override
-    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
-      if (!processed) {
-        processed = true;
-        try (Writer writer =
-                processingEnv.getFiler().createSourceFile(generatedClassName).openWriter()) {
-          writer.append(generatedSource);
-        } catch (IOException e) {
-          throw new RuntimeException(e);
-        }
-      }
-      return false;
     }
   }
 }

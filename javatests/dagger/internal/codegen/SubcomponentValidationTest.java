@@ -540,7 +540,7 @@ public class SubcomponentValidationTest {
                 "    private ChildModule childModule;",
                 "",
                 "    private ChildComponentImpl() {",
-                "      initialize();",
+                "      this.childModule = new ChildModule();",
                 "    }",
                 "")
             .addLinesIn(
@@ -567,11 +567,6 @@ public class SubcomponentValidationTest {
                 "              DaggerParentComponent.this.getDep1(),",
                 "              DaggerParentComponent.this.getDep2()));")
             .addLines(
-                "    }",
-                "",
-                "    @SuppressWarnings(\"unchecked\")",
-                "    private void initialize() {",
-                "      this.childModule = new ChildModule();",
                 "    }",
                 "",
                 "    @Override",
@@ -1113,5 +1108,58 @@ public class SubcomponentValidationTest {
                 + "test.TestModule.providesConflictsWithModuleSubcomponents()");
     assertThat(compilation)
         .hadErrorContaining("@Module(subcomponents = test.Sub.class) for test.TestModule");
+  }
+
+  @Test
+  public void subcomponentDependsOnGeneratedType() {
+    JavaFileObject parent =
+        JavaFileObjects.forSourceLines(
+            "test.Parent",
+            "package test;",
+            "",
+            "import dagger.Component;",
+            "",
+            "@Component",
+            "interface Parent {",
+            "  Child.Builder childBuilder();",
+            "}");
+
+    JavaFileObject child =
+        JavaFileObjects.forSourceLines(
+            "test.Child",
+            "package test;",
+            "",
+            "import dagger.Subcomponent;",
+            "",
+            "@Subcomponent",
+            "interface Child extends ChildSupertype {",
+            "  @Subcomponent.Builder",
+            "  interface Builder {",
+            "    Child build();",
+            "  }",
+            "}");
+
+    JavaFileObject childSupertype =
+        JavaFileObjects.forSourceLines(
+            "test.ChildSupertype",
+            "package test;",
+            "",
+            "interface ChildSupertype {",
+            "  GeneratedType generatedType();",
+            "}");
+
+    Compilation compilation =
+        daggerCompiler(
+                new GeneratingProcessor(
+                    "test.GeneratedType",
+                    "package test;",
+                    "",
+                    "import javax.inject.Inject;",
+                    "",
+                    "final class GeneratedType {",
+                    "  @Inject GeneratedType() {}",
+                    "}"))
+            .compile(parent, child, childSupertype);
+    assertThat(compilation).succeededWithoutWarnings();
   }
 }

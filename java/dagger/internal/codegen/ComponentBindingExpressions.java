@@ -18,20 +18,20 @@ package dagger.internal.codegen;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
 import static dagger.internal.codegen.Accessibility.isRawTypeAccessible;
 import static dagger.internal.codegen.Accessibility.isTypeAccessibleFrom;
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
 import static dagger.internal.codegen.BindingType.MEMBERS_INJECTION;
 import static dagger.internal.codegen.CodeBlocks.makeParametersCodeBlock;
 import static dagger.internal.codegen.DelegateBindingExpression.isBindsScopeStrongerThanDependencyScope;
 import static dagger.internal.codegen.MemberSelect.staticFactoryCreation;
+import static dagger.internal.codegen.RequestKinds.isDerivedFromProvider;
 import static dagger.internal.codegen.TypeNames.DOUBLE_CHECK;
-import static dagger.internal.codegen.TypeNames.REFERENCE_RELEASING_PROVIDER;
 import static dagger.internal.codegen.TypeNames.SINGLE_CHECK;
 import static dagger.model.BindingKind.DELEGATE;
 import static dagger.model.BindingKind.MULTIBOUND_MAP;
 import static dagger.model.BindingKind.MULTIBOUND_SET;
-import static javax.lang.model.element.Modifier.PUBLIC;
 
 import com.google.auto.common.MoreTypes;
 import com.google.common.collect.ImmutableList;
@@ -40,10 +40,7 @@ import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import dagger.internal.codegen.ComponentDescriptor.ComponentMethodDescriptor;
 import dagger.internal.codegen.FrameworkFieldInitializer.FrameworkInstanceCreationExpression;
-import dagger.internal.codegen.ModifiableBindingMethods.ModifiableBindingMethod;
-import dagger.model.BindingKind;
 import dagger.model.DependencyRequest;
-import dagger.model.Key;
 import dagger.model.RequestKind;
 import java.util.HashMap;
 import java.util.Map;
@@ -53,17 +50,14 @@ import javax.lang.model.type.TypeMirror;
 
 /** A central repository of code expressions used to access any binding available to a component. */
 final class ComponentBindingExpressions {
-
-  // TODO(dpb,ronshapiro): refactor this and ComponentRequirementFields into a
+  // TODO(dpb,ronshapiro): refactor this and ComponentRequirementExpressions into a
   // HierarchicalComponentMap<K, V>, or perhaps this use a flattened ImmutableMap, built from its
   // parents? If so, maybe make BindingExpression.Factory create it.
 
   private final Optional<ComponentBindingExpressions> parent;
   private final BindingGraph graph;
-  private final GeneratedComponentModel generatedComponentModel;
-  private final SubcomponentNames subcomponentNames;
-  private final ComponentRequirementFields componentRequirementFields;
-  private final ReferenceReleasingManagerFields referenceReleasingManagerFields;
+  private final ComponentImplementation componentImplementation;
+  private final ComponentRequirementExpressions componentRequirementExpressions;
   private final OptionalFactories optionalFactories;
   private final DaggerTypes types;
   private final DaggerElements elements;
@@ -71,13 +65,13 @@ final class ComponentBindingExpressions {
   private final MembersInjectionMethods membersInjectionMethods;
   private final InnerSwitchingProviders innerSwitchingProviders;
   private final StaticSwitchingProviders staticSwitchingProviders;
+  private final ModifiableBindingExpressions modifiableBindingExpressions;
   private final Map<BindingRequest, BindingExpression> expressions = new HashMap<>();
 
   ComponentBindingExpressions(
       BindingGraph graph,
-      GeneratedComponentModel generatedComponentModel,
-      SubcomponentNames subcomponentNames,
-      ComponentRequirementFields componentRequirementFields,
+      ComponentImplementation componentImplementation,
+      ComponentRequirementExpressions componentRequirementExpressions,
       OptionalFactories optionalFactories,
       DaggerTypes types,
       DaggerElements elements,
@@ -85,11 +79,9 @@ final class ComponentBindingExpressions {
     this(
         Optional.empty(),
         graph,
-        generatedComponentModel,
-        subcomponentNames,
-        componentRequirementFields,
-        new ReferenceReleasingManagerFields(graph, generatedComponentModel, compilerOptions),
-        new StaticSwitchingProviders(generatedComponentModel, types),
+        componentImplementation,
+        componentRequirementExpressions,
+        new StaticSwitchingProviders(componentImplementation, types),
         optionalFactories,
         types,
         elements,
@@ -99,10 +91,8 @@ final class ComponentBindingExpressions {
   private ComponentBindingExpressions(
       Optional<ComponentBindingExpressions> parent,
       BindingGraph graph,
-      GeneratedComponentModel generatedComponentModel,
-      SubcomponentNames subcomponentNames,
-      ComponentRequirementFields componentRequirementFields,
-      ReferenceReleasingManagerFields referenceReleasingManagerFields,
+      ComponentImplementation componentImplementation,
+      ComponentRequirementExpressions componentRequirementExpressions,
       StaticSwitchingProviders staticSwitchingProviders,
       OptionalFactories optionalFactories,
       DaggerTypes types,
@@ -110,19 +100,25 @@ final class ComponentBindingExpressions {
       CompilerOptions compilerOptions) {
     this.parent = parent;
     this.graph = graph;
-    this.generatedComponentModel = generatedComponentModel;
-    this.subcomponentNames = checkNotNull(subcomponentNames);
-    this.componentRequirementFields = checkNotNull(componentRequirementFields);
-    this.referenceReleasingManagerFields = checkNotNull(referenceReleasingManagerFields);
+    this.componentImplementation = componentImplementation;
+    this.componentRequirementExpressions = checkNotNull(componentRequirementExpressions);
     this.optionalFactories = checkNotNull(optionalFactories);
     this.types = checkNotNull(types);
     this.elements = checkNotNull(elements);
     this.compilerOptions = checkNotNull(compilerOptions);
     this.membersInjectionMethods =
-        new MembersInjectionMethods(generatedComponentModel, this, graph, elements, types);
+        new MembersInjectionMethods(componentImplementation, this, graph, elements, types);
     this.innerSwitchingProviders =
-        new InnerSwitchingProviders(generatedComponentModel, this, types);
+        new InnerSwitchingProviders(componentImplementation, this, types);
     this.staticSwitchingProviders = staticSwitchingProviders;
+    this.modifiableBindingExpressions =
+        new ModifiableBindingExpressions(
+            parent.map(cbe -> cbe.modifiableBindingExpressions),
+            this,
+            graph,
+            componentImplementation,
+            compilerOptions,
+            types);
   }
 
   /**
@@ -130,15 +126,13 @@ final class ComponentBindingExpressions {
    */
   ComponentBindingExpressions forChildComponent(
       BindingGraph childGraph,
-      GeneratedComponentModel childComponentModel,
-      ComponentRequirementFields childComponentRequirementFields) {
+      ComponentImplementation childComponentImplementation,
+      ComponentRequirementExpressions childComponentRequirementExpressions) {
     return new ComponentBindingExpressions(
         Optional.of(this),
         childGraph,
-        childComponentModel,
-        subcomponentNames,
-        childComponentRequirementFields,
-        referenceReleasingManagerFields,
+        childComponentImplementation,
+        childComponentRequirementExpressions,
         staticSwitchingProviders,
         optionalFactories,
         types,
@@ -146,65 +140,38 @@ final class ComponentBindingExpressions {
         compilerOptions);
   }
 
-  /**
-   * Returns an expression that evaluates to the value of a dependency request for a binding owned
-   * by this component or an ancestor.
-   *
-   * @param requestingClass the class that will contain the expression
-   * @throws IllegalStateException if there is no binding expression that satisfies the dependency
-   *     request
-   */
-  Expression getDependencyExpression(Key key, RequestKind requestKind, ClassName requestingClass) {
-    return getDependencyExpression(
-        BindingRequest.forDependencyRequest(key, requestKind), requestingClass);
+  /* Returns the {@link ModifiableBindingExpressions} for this component. */
+  ModifiableBindingExpressions modifiableBindingExpressions() {
+    return modifiableBindingExpressions;
   }
 
   /**
-   * Returns an expression that evaluates to the value of a dependency request for a binding owned
-   * by this component or an ancestor.
-   *
-   * @param requestingClass the class that will contain the expression
-   * @throws IllegalStateException if there is no binding expression that satisfies the dependency
-   *     request
-   */
-  Expression getDependencyExpression(DependencyRequest request, ClassName requestingClass) {
-    return getDependencyExpression(BindingRequest.forDependencyRequest(request), requestingClass);
-  }
-
-  /**
-   * Returns an expression that evaluates to the value of a framework dependency for a binding owned
-   * in this component or an ancestor.
-   *
-   * @param requestingClass the class that will contain the expression
-   * @throws IllegalStateException if there is no binding expression that satisfies the dependency
-   *     request
-   */
-  Expression getDependencyExpression(
-      FrameworkDependency frameworkDependency, ClassName requestingClass) {
-    return getDependencyExpression(
-        BindingRequest.forFrameworkDependency(frameworkDependency), requestingClass);
-  }
-
-  /**
-   * Returns an expression that evaluates to the value of a framework request for a binding owned by
+   * Returns an expression that evaluates to the value of a binding request for a binding owned by
    * this component or an ancestor.
    *
    * @param requestingClass the class that will contain the expression
-   * @throws IllegalStateException if there is no binding expression that satisfies the framework
-   *     request
+   * @throws IllegalStateException if there is no binding expression that satisfies the request
    */
-  Expression getDependencyExpression(
-      Key key, FrameworkType frameworkType, ClassName requestingClass) {
-    return getDependencyExpression(
-        BindingRequest.forFrameworkDependency(key, frameworkType), requestingClass);
-  }
-
-  private Expression getDependencyExpression(BindingRequest request, ClassName requestingClass) {
+  Expression getDependencyExpression(BindingRequest request, ClassName requestingClass) {
     return getBindingExpression(request).getDependencyExpression(requestingClass);
   }
 
   /**
-   * Returns the {@link CodeBlock} for the method argmuments used with the factory {@code create()}
+   * Equivalent to {@link #getDependencyExpression(BindingRequest, ClassName)} that is used only
+   * when the request is for implementation of a component method.
+   *
+   * @throws IllegalStateException if there is no binding expression that satisfies the request
+   */
+  Expression getDependencyExpressionForComponentMethod(
+      BindingRequest request,
+      ComponentMethodDescriptor componentMethod,
+      ComponentImplementation componentImplementation) {
+    return getBindingExpression(request)
+        .getDependencyExpressionForComponentMethod(componentMethod, componentImplementation);
+  }
+
+  /**
+   * Returns the {@link CodeBlock} for the method arguments used with the factory {@code create()}
    * method for the given {@link ContributionBinding binding}.
    */
   CodeBlock getCreateMethodArgumentsCodeBlock(ContributionBinding binding) {
@@ -216,15 +183,14 @@ final class ComponentBindingExpressions {
 
     if (binding.requiresModuleInstance()) {
       arguments.add(
-          componentRequirementFields.getExpressionDuringInitialization(
+          componentRequirementExpressions.getExpressionDuringInitialization(
               ComponentRequirement.forModule(binding.contributingModule().get().asType()),
-              generatedComponentModel.name()));
+              componentImplementation.name()));
     }
 
-    binding
-        .frameworkDependencies()
-        .stream()
-        .map(dependency -> getDependencyExpression(dependency, generatedComponentModel.name()))
+    binding.frameworkDependencies().stream()
+        .map(BindingRequest::bindingRequest)
+        .map(request -> getDependencyExpression(request, componentImplementation.name()))
         .map(Expression::codeBlock)
         .forEach(arguments::add);
 
@@ -241,12 +207,12 @@ final class ComponentBindingExpressions {
    *
    * @param requestingClass the class that will contain the expression
    */
-  // TODO(b/64024402) Merge with getDependencyExpression(DependencyRequest, ClassName) if possible.
   Expression getDependencyArgumentExpression(
       DependencyRequest dependencyRequest, ClassName requestingClass) {
 
     TypeMirror dependencyType = dependencyRequest.key().type();
-    Expression dependencyExpression = getDependencyExpression(dependencyRequest, requestingClass);
+    Expression dependencyExpression =
+        getDependencyExpression(bindingRequest(dependencyRequest), requestingClass);
 
     if (dependencyRequest.kind().equals(RequestKind.INSTANCE)
         && !isTypeAccessibleFrom(dependencyType, requestingClass.packageName())
@@ -257,143 +223,44 @@ final class ComponentBindingExpressions {
     return dependencyExpression;
   }
 
-  /**
-   * Returns the implementation of a component method. Returns {@link Optional#empty} if the
-   * component method implementation should not be emitted.
-   */
-  Optional<MethodSpec> getComponentMethod(ComponentMethodDescriptor componentMethod) {
+  /** Returns the implementation of a component method. */
+  MethodSpec getComponentMethod(ComponentMethodDescriptor componentMethod) {
     checkArgument(componentMethod.dependencyRequest().isPresent());
-    BindingRequest request =
-        BindingRequest.forDependencyRequest(componentMethod.dependencyRequest().get());
-    MethodSpec method =
-        MethodSpec.overriding(
-                componentMethod.methodElement(),
-                MoreTypes.asDeclared(graph.componentType().asType()),
-                types)
-            .addCode(
-                getBindingExpression(request)
-                    .getComponentMethodImplementation(componentMethod, generatedComponentModel))
-            .build();
-
-    ModifiableBindingType modifiableBindingType = getModifiableBindingType(request);
-    if (modifiableBindingType.isModifiable()) {
-      generatedComponentModel.registerModifiableBindingMethod(
-          modifiableBindingType,
-          request,
-          method,
-          newModifiableBindingWillBeFinalized(modifiableBindingType, request));
-      if (!modifiableBindingType.hasBaseClassImplementation()) {
-        // A component method should not be emitted if it encapsulates a modifiable binding that
-        // cannot be satisfied by the abstract base class implementation of a subcomponent.
-        checkState(
-            !generatedComponentModel.supermodel().isPresent(),
-            "Attempting to generate a component method in a subtype of the abstract subcomponent "
-                + "base class.");
-        return Optional.empty();
-      }
-    }
-
-    return Optional.of(method);
+    BindingRequest request = bindingRequest(componentMethod.dependencyRequest().get());
+    return MethodSpec.overriding(
+            componentMethod.methodElement(),
+            MoreTypes.asDeclared(graph.componentTypeElement().asType()),
+            types)
+        .addCode(
+            getBindingExpression(request)
+                .getComponentMethodImplementation(componentMethod, componentImplementation))
+        .build();
   }
 
-  /**
-   * Returns the implementation of a modifiable binding method originally defined in a supertype
-   * implementation of this subcomponent. Returns {@link Optional#empty()} when the binding cannot
-   * or should not be modified by the current binding graph. This is only relevant for ahead-of-time
-   * subcomponents.
-   */
-  Optional<ModifiableBindingMethod> getModifiableBindingMethod(
-      ModifiableBindingMethod modifiableBindingMethod) {
-    if (shouldModifyKnownBinding(modifiableBindingMethod)) {
-      MethodSpec baseMethod = modifiableBindingMethod.methodSpec();
-      return Optional.of(
-          ModifiableBindingMethod.implement(
-              modifiableBindingMethod,
-              MethodSpec.methodBuilder(baseMethod.name)
-                  .addModifiers(PUBLIC)
-                  // TODO(b/72748365): Mark method as final if binding should not be further
-                  // modified.
-                  .returns(baseMethod.returnType)
-                  .addAnnotation(Override.class)
-                  .addCode(
-                      getBindingExpression(modifiableBindingMethod.request())
-                          .getModifiableBindingMethodImplementation(
-                              modifiableBindingMethod, generatedComponentModel))
-                  .build(),
-              knownModifiableBindingWillBeFinalized(modifiableBindingMethod)));
-    }
-    return Optional.empty();
-  }
-
-  /**
-   * Returns true if a modifiable binding method that was registered in a superclass implementation
-   * of this subcomponent should be marked as "finalized" if it is being overridden by this
-   * subcomponent implementation. "Finalized" means we should not attempt to modify the binding in
-   * any subcomponent subclass. This is only relevant for ahead-of-time subcomponents.
-   */
-  // TODO(user): extract a ModifiableBindingExpressions class? This may need some dependencies
-  // (like the GCM) but could remove some concerns from this class
-  private boolean knownModifiableBindingWillBeFinalized(
-      ModifiableBindingMethod modifiableBindingMethod) {
-    ModifiableBindingType newModifiableBindingType =
-        getModifiableBindingType(modifiableBindingMethod.request());
-    if (!newModifiableBindingType.isModifiable()) {
-      // If a modifiable binding has become non-modifiable it is final by definition.
-      return true;
-    }
-    // All currently supported modifiable types are finalized upon modification.
-    return modifiableBindingWillBeFinalized(
-        newModifiableBindingType,
-        shouldModifyBinding(newModifiableBindingType, modifiableBindingMethod.request()));
-  }
-
-  /**
-   * Returns true if a newly discovered modifiable binding method, once it is defined in this
-   * subcomponent implementation, should be marked as "finalized", meaning we should not attempt to
-   * modify the binding in any subcomponent subclass. This is only relevant for ahead-of-time
-   * subcomponents.
-   */
-  private boolean newModifiableBindingWillBeFinalized(
-      ModifiableBindingType modifiableBindingType, BindingRequest request) {
-    return modifiableBindingWillBeFinalized(
-        modifiableBindingType, shouldModifyBinding(modifiableBindingType, request));
-  }
-
-  /**
-   * Returns true if we shouldn't attempt to further modify a modifiable binding once we complete
-   * the implementation for the current subcomponent.
-   */
-  private boolean modifiableBindingWillBeFinalized(
-      ModifiableBindingType modifiableBindingType, boolean modifyingBinding) {
-    switch (modifiableBindingType) {
-      case MISSING:
-      case GENERATED_INSTANCE:
-      case OPTIONAL:
-      case INJECTION:
-        // Once we modify any of the above a single time, then they are finalized.
-        return modifyingBinding;
-      case MULTIBINDING:
-        return false;
-      default:
-        throw new IllegalStateException(
-            String.format(
-                "Building binding expression for unsupported ModifiableBindingType [%s].",
-                modifiableBindingType));
-    }
-  }
-
-  private BindingExpression getBindingExpression(BindingRequest request) {
+  /** Returns the {@link BindingExpression} for the given {@link BindingRequest}. */
+  BindingExpression getBindingExpression(BindingRequest request) {
     if (expressions.containsKey(request)) {
       return expressions.get(request);
     }
-    Optional<BindingExpression> expression = Optional.empty();
-    ModifiableBindingType modifiableBindingType = getModifiableBindingType(request);
-    if (modifiableBindingType.isModifiable()) {
-      expression = Optional.of(createModifiableBindingExpression(modifiableBindingType, request));
-    } else if (resolvedInThisComponent(request)) {
+    Optional<BindingExpression> expression =
+        modifiableBindingExpressions.maybeCreateModifiableBindingExpression(request);
+    if (!expression.isPresent()) {
       ResolvedBindings resolvedBindings = graph.resolvedBindings(request);
-      expression = Optional.of(createBindingExpression(resolvedBindings, request));
+      if (resolvedBindings != null && !resolvedBindings.ownedBindings().isEmpty()) {
+        expression = Optional.of(createBindingExpression(resolvedBindings, request));
+      }
     }
+    if (!expression.isPresent()
+        && compilerOptions.aheadOfTimeSubcomponents()
+        && request.requestKind().isPresent()
+        && isDerivedFromProvider(request.requestKind().get())) {
+      RequestKind requestKind = request.requestKind().get();
+      expression =
+          Optional.of(
+              new DerivedFromFrameworkInstanceBindingExpression(
+                  request.key(), FrameworkType.PROVIDER, requestKind, this, types));
+    }
+
     if (expression.isPresent()) {
       expressions.put(request, expression.get());
       return expression.get();
@@ -403,7 +270,7 @@ final class ComponentBindingExpressions {
   }
 
   /** Creates a binding expression. */
-  private BindingExpression createBindingExpression(
+  BindingExpression createBindingExpression(
       ResolvedBindings resolvedBindings, BindingRequest request) {
     switch (resolvedBindings.bindingType()) {
       case MEMBERS_INJECTION:
@@ -422,165 +289,10 @@ final class ComponentBindingExpressions {
   }
 
   /**
-   * Creates a binding expression for a binding that may be modified across implementations of a
-   * subcomponent. This is only relevant for ahead-of-time subcomponents.
-   */
-  private BindingExpression createModifiableBindingExpression(
-      ModifiableBindingType type, BindingRequest request) {
-    ResolvedBindings resolvedBindings = graph.resolvedBindings(request);
-    Optional<ModifiableBindingMethod> matchingModifiableBindingMethod =
-        generatedComponentModel.getModifiableBindingMethod(request);
-    Optional<ComponentMethodDescriptor> matchingComponentMethod =
-        findMatchingComponentMethod(request);
-    switch (type) {
-      case GENERATED_INSTANCE:
-        return new GeneratedInstanceBindingExpression(
-            generatedComponentModel,
-            resolvedBindings,
-            request,
-            matchingModifiableBindingMethod,
-            matchingComponentMethod);
-      case MISSING:
-        return new MissingBindingExpression(
-            generatedComponentModel,
-            request,
-            matchingModifiableBindingMethod,
-            matchingComponentMethod);
-      case OPTIONAL:
-      case MULTIBINDING:
-      case INJECTION:
-        return wrapInMethod(
-            resolvedBindings, request, createBindingExpression(resolvedBindings, request));
-      default:
-        throw new IllegalStateException(
-            String.format(
-                "Building binding expression for unsupported ModifiableBindingType [%s].", type));
-    }
-  }
-
-  /**
-   * The reason why a binding may need to be modified across implementations of a subcomponent, if
-   * at all. This is only relevant for ahead-of-time subcomponents.
-   */
-  private ModifiableBindingType getModifiableBindingType(BindingRequest request) {
-    if (!compilerOptions.aheadOfTimeSubcomponents()) {
-      return ModifiableBindingType.NONE;
-    }
-
-    // When generating a final (concrete) implementation of a (sub)component the binding is no
-    // longer considered modifiable. It cannot be further modified by a subclass implementation.
-    if (!generatedComponentModel.isAbstract()) {
-      return ModifiableBindingType.NONE;
-    }
-
-    if (resolvedInThisComponent(request)) {
-      ResolvedBindings resolvedBindings = graph.resolvedBindings(request);
-      if (resolvedBindings.contributionBindings().isEmpty()) {
-        // TODO(ronshapiro): Confirm whether a resolved binding must have a single contribution
-        // binding.
-        return ModifiableBindingType.NONE;
-      }
-
-      ContributionBinding binding = resolvedBindings.contributionBinding();
-      if (binding.requiresGeneratedInstance()) {
-        return ModifiableBindingType.GENERATED_INSTANCE;
-      }
-
-      if (binding.kind().equals(BindingKind.OPTIONAL)) {
-        return ModifiableBindingType.OPTIONAL;
-      }
-
-      if (resolvedBindings.bindingType().equals(BindingType.PROVISION)
-          && binding.isSyntheticMultibinding()) {
-        return ModifiableBindingType.MULTIBINDING;
-      }
-
-      if (binding.kind().equals(BindingKind.INJECTION)) {
-        return ModifiableBindingType.INJECTION;
-      }
-    } else if (!resolvableBinding(request)) {
-      return ModifiableBindingType.MISSING;
-    }
-
-    return ModifiableBindingType.NONE;
-  }
-
-  /**
-   * Returns true if the current binding graph can, and should, modify a binding by overriding a
-   * modifiable binding method. This is only relevant for ahead-of-time subcomponents.
-   */
-  private boolean shouldModifyKnownBinding(ModifiableBindingMethod modifiableBindingMethod) {
-    ModifiableBindingType newModifiableBindingType =
-        getModifiableBindingType(modifiableBindingMethod.request());
-    if (!newModifiableBindingType.equals(modifiableBindingMethod.type())) {
-      // It is possible that a binding can change types, in which case we should always modify the
-      // binding.
-      return true;
-    }
-    return shouldModifyBinding(modifiableBindingMethod.type(), modifiableBindingMethod.request());
-  }
-
-  /**
-   * Returns true if the current binding graph can, and should, modify a binding by overriding a
-   * modifiable binding method. This is only relevant for ahead-of-time subcomponents.
-   */
-  private boolean shouldModifyBinding(
-      ModifiableBindingType modifiableBindingType, BindingRequest request) {
-    ResolvedBindings resolvedBindings = graph.resolvedBindings(request);
-    switch (modifiableBindingType) {
-      case GENERATED_INSTANCE:
-        return !generatedComponentModel.isAbstract();
-      case MISSING:
-        // TODO(b/72748365): investigate beder@'s comment about having intermediate component
-        // ancestors satisfy missing bindings of their children with their own missing binding
-        // methods so that we can minimize the cases where we need to reach into doubly-nested
-        // descendant component implementations
-        return resolvableBinding(request);
-      case OPTIONAL:
-        // Only override optional binding methods if we have a non-empty binding.
-        return !resolvedBindings.contributionBinding().dependencies().isEmpty();
-      case MULTIBINDING:
-        // Only modify a multibinding if there are new contributions.
-        return !generatedComponentModel
-            .superclassContributionsMade(request.key())
-            .containsAll(resolvedBindings.contributionBinding().dependencies());
-      case INJECTION:
-        return !resolvedBindings.contributionBinding().kind().equals(BindingKind.INJECTION);
-      default:
-        throw new IllegalStateException(
-            String.format(
-                "Overriding modifiable binding method with unsupported ModifiableBindingType [%s].",
-                modifiableBindingType));
-    }
-  }
-
-  /**
-   * Returns true if the binding can be resolved by the graph for this component or any parent
-   * component.
-   */
-  private boolean resolvableBinding(BindingRequest request) {
-    for (ComponentBindingExpressions expressions = this;
-        expressions != null;
-        expressions = expressions.parent.orElse(null)) {
-      if (expressions.resolvedInThisComponent(request)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** Returns true if the binding can be resolved by the graph for this component. */
-  private boolean resolvedInThisComponent(BindingRequest request) {
-    ResolvedBindings resolvedBindings = graph.resolvedBindings(request);
-    return resolvedBindings != null && !resolvedBindings.ownedBindings().isEmpty();
-  }
-
-  /**
    * Returns a binding expression that uses a {@link javax.inject.Provider} for provision bindings
    * or a {@link dagger.producers.Producer} for production bindings.
    */
-  private FrameworkInstanceBindingExpression frameworkInstanceBindingExpression(
-      ResolvedBindings resolvedBindings) {
+  private BindingExpression frameworkInstanceBindingExpression(ResolvedBindings resolvedBindings) {
     // TODO(user): Consider merging the static factory creation logic into CreationExpressions?
     Optional<MemberSelect> staticMethod =
         useStaticFactoryCreation(resolvedBindings.contributionBinding())
@@ -594,15 +306,15 @@ final class ComponentBindingExpressions {
         staticMethod.isPresent()
             ? staticMethod::get
             : new FrameworkFieldInitializer(
-                generatedComponentModel, resolvedBindings, frameworkInstanceCreationExpression);
+                componentImplementation, resolvedBindings, frameworkInstanceCreationExpression);
 
     switch (resolvedBindings.bindingType()) {
       case PROVISION:
         return new ProviderInstanceBindingExpression(
             resolvedBindings, frameworkInstanceSupplier, types, elements);
       case PRODUCTION:
-        return new ProducerInstanceBindingExpression(
-            resolvedBindings, frameworkInstanceSupplier, types, elements);
+        return new ProducerNodeInstanceBindingExpression(
+            resolvedBindings, frameworkInstanceSupplier, types, elements, componentImplementation);
       default:
         throw new AssertionError("invalid binding type: " + resolvedBindings.bindingType());
     }
@@ -610,21 +322,11 @@ final class ComponentBindingExpressions {
 
   private FrameworkInstanceCreationExpression scope(
       ResolvedBindings resolvedBindings, FrameworkInstanceCreationExpression unscoped) {
-    if (requiresReleasableReferences(resolvedBindings)) {
-      return () ->
-          CodeBlock.of(
-              "$T.create($L, $L)",
-              REFERENCE_RELEASING_PROVIDER,
-              unscoped.creationExpression(),
-              referenceReleasingManagerFields.getExpression(
-                  resolvedBindings.scope().get(), generatedComponentModel.name()));
-    } else {
-      return () ->
-          CodeBlock.of(
-              "$T.provider($L)",
-              resolvedBindings.scope().get().isReusable() ? SINGLE_CHECK : DOUBLE_CHECK,
-              unscoped.creationExpression());
-    }
+    return () ->
+        CodeBlock.of(
+            "$T.provider($L)",
+            resolvedBindings.scope().get().isReusable() ? SINGLE_CHECK : DOUBLE_CHECK,
+            unscoped.creationExpression());
   }
 
   /**
@@ -651,11 +353,15 @@ final class ComponentBindingExpressions {
 
       case COMPONENT_PROVISION:
         return new DependencyMethodProviderCreationExpression(
-            binding, generatedComponentModel, componentRequirementFields, compilerOptions, graph);
+            binding,
+            componentImplementation,
+            componentRequirementExpressions,
+            compilerOptions,
+            graph);
 
       case SUBCOMPONENT_BUILDER:
         return new SubcomponentBuilderProviderCreationExpression(
-            binding.key().type(), subcomponentNames.get(binding.key()));
+            binding.key().type(), componentImplementation.getSubcomponentName(binding.key()));
 
       case INJECTION:
       case PROVISION:
@@ -665,33 +371,25 @@ final class ComponentBindingExpressions {
 
       case COMPONENT_PRODUCTION:
         return new DependencyMethodProducerCreationExpression(
-            binding, generatedComponentModel, componentRequirementFields, graph);
+            binding, componentImplementation, componentRequirementExpressions, graph);
 
       case PRODUCTION:
         return new ProducerCreationExpression(binding, this);
 
       case MULTIBOUND_SET:
-        return new SetFactoryCreationExpression(binding, generatedComponentModel, this, graph);
+        return new SetFactoryCreationExpression(binding, componentImplementation, this, graph);
 
       case MULTIBOUND_MAP:
         return new MapFactoryCreationExpression(
-            binding, generatedComponentModel, this, graph, elements);
-
-      case RELEASABLE_REFERENCE_MANAGER:
-        return new ReleasableReferenceManagerProviderCreationExpression(
-            binding, generatedComponentModel, referenceReleasingManagerFields);
-
-      case RELEASABLE_REFERENCE_MANAGERS:
-        return new ReleasableReferenceManagerSetProviderCreationExpression(
-            binding, generatedComponentModel, referenceReleasingManagerFields, graph);
+            binding, componentImplementation, this, graph, elements);
 
       case DELEGATE:
         return new DelegatingFrameworkInstanceCreationExpression(
-            binding, generatedComponentModel, this);
+            binding, componentImplementation, this);
 
       case OPTIONAL:
         return new OptionalFactoryInstanceCreationExpression(
-            optionalFactories, binding, generatedComponentModel, this);
+            optionalFactories, binding, componentImplementation, this);
 
       case MEMBERS_INJECTOR:
         return new MembersInjectorProviderCreationExpression((ProvisionBinding) binding, this);
@@ -706,16 +404,20 @@ final class ComponentBindingExpressions {
     return new InstanceFactoryCreationExpression(
         binding.nullableType().isPresent(),
         () ->
-            componentRequirementFields.getExpressionDuringInitialization(
-                componentRequirement, generatedComponentModel.name()));
+            componentRequirementExpressions.getExpressionDuringInitialization(
+                componentRequirement, componentImplementation.name()));
   }
 
   /** Returns a binding expression for a provision binding. */
   private BindingExpression provisionBindingExpression(
       ResolvedBindings resolvedBindings, BindingRequest request) {
-    // All provision requests should have an associated RequestKind, even if they're a framework
-    // request.
-    checkArgument(request.requestKind().isPresent());
+    if (!request.requestKind().isPresent()) {
+      verify(
+          request.frameworkType().get().equals(FrameworkType.PRODUCER_NODE),
+          "expected a PRODUCER_NODE: %s",
+          request);
+      return producerFromProviderBindingExpression(resolvedBindings);
+    }
     RequestKind requestKind = request.requestKind().get();
     switch (requestKind) {
       case INSTANCE:
@@ -728,7 +430,7 @@ final class ComponentBindingExpressions {
       case PRODUCED:
       case PROVIDER_OF_LAZY:
         return new DerivedFromFrameworkInstanceBindingExpression(
-            resolvedBindings, FrameworkType.PROVIDER, requestKind, this, types);
+            resolvedBindings.key(), FrameworkType.PROVIDER, requestKind, this, types);
 
       case PRODUCER:
         return producerFromProviderBindingExpression(resolvedBindings);
@@ -750,8 +452,9 @@ final class ComponentBindingExpressions {
       return frameworkInstanceBindingExpression(resolvedBindings);
     } else {
       // If no FrameworkType is present, a RequestKind is guaranteed to be present.
+      RequestKind requestKind = request.requestKind().get();
       return new DerivedFromFrameworkInstanceBindingExpression(
-          resolvedBindings, FrameworkType.PRODUCER, request.requestKind().get(), this, types);
+          resolvedBindings.key(), FrameworkType.PRODUCER_NODE, requestKind, this, types);
     }
   }
 
@@ -778,7 +481,7 @@ final class ComponentBindingExpressions {
             instanceof DerivedFromFrameworkInstanceBindingExpression)) {
       return wrapInMethod(
           resolvedBindings,
-          BindingRequest.forDependencyRequest(resolvedBindings.key(), RequestKind.PROVIDER),
+          bindingRequest(resolvedBindings.key(), RequestKind.PROVIDER),
           innerSwitchingProviders.newBindingExpression(resolvedBindings.contributionBinding()));
     }
     return frameworkInstanceBindingExpression(resolvedBindings);
@@ -791,15 +494,16 @@ final class ComponentBindingExpressions {
   private FrameworkInstanceBindingExpression producerFromProviderBindingExpression(
       ResolvedBindings resolvedBindings) {
     checkArgument(resolvedBindings.bindingType().equals(BindingType.PROVISION));
-    return new ProducerInstanceBindingExpression(
+    return new ProducerNodeInstanceBindingExpression(
         resolvedBindings,
         new FrameworkFieldInitializer(
-            generatedComponentModel,
+            componentImplementation,
             resolvedBindings,
             new ProducerFromProviderCreationExpression(
-                resolvedBindings.contributionBinding(), generatedComponentModel, this)),
+                resolvedBindings.contributionBinding(), componentImplementation, this)),
         types,
-        elements);
+        elements,
+        componentImplementation);
   }
 
   /**
@@ -808,9 +512,6 @@ final class ComponentBindingExpressions {
    * <p>If there is a direct expression (not calling {@link Provider#get()}) we can use for an
    * instance of this binding, return it, wrapped in a method if the binding {@linkplain
    * #needsCaching(ResolvedBindings) needs to be cached} or the expression has dependencies.
-   *
-   * <p>In default mode, we can use direct expressions for bindings that don't need to be cached in
-   * a reference-releasing scope.
    *
    * <p>In fastInit mode, we can use direct expressions unless the binding needs to be cached.
    */
@@ -824,12 +525,12 @@ final class ComponentBindingExpressions {
               || needsCaching(resolvedBindings)
           ? wrapInMethod(
               resolvedBindings,
-              BindingRequest.forDependencyRequest(resolvedBindings.key(), RequestKind.INSTANCE),
+              bindingRequest(resolvedBindings.key(), RequestKind.INSTANCE),
               directInstanceExpression)
           : directInstanceExpression;
     }
     return new DerivedFromFrameworkInstanceBindingExpression(
-        resolvedBindings, FrameworkType.PROVIDER, RequestKind.INSTANCE, this, types);
+        resolvedBindings.key(), FrameworkType.PROVIDER, RequestKind.INSTANCE, this, types);
   }
 
   /**
@@ -847,34 +548,35 @@ final class ComponentBindingExpressions {
       case COMPONENT:
         return Optional.of(
             new ComponentInstanceBindingExpression(
-                resolvedBindings, generatedComponentModel.name()));
+                resolvedBindings, componentImplementation.name()));
 
       case COMPONENT_DEPENDENCY:
         return Optional.of(
             new ComponentRequirementBindingExpression(
                 resolvedBindings,
                 ComponentRequirement.forDependency(resolvedBindings.key().type()),
-                componentRequirementFields));
+                componentRequirementExpressions));
 
       case COMPONENT_PROVISION:
         return Optional.of(
             new ComponentProvisionBindingExpression(
-                resolvedBindings, graph, componentRequirementFields, compilerOptions));
+                resolvedBindings, graph, componentRequirementExpressions, compilerOptions));
 
       case SUBCOMPONENT_BUILDER:
         return Optional.of(
             new SubcomponentBuilderBindingExpression(
-                resolvedBindings, subcomponentNames.get(resolvedBindings.key())));
+                resolvedBindings,
+                componentImplementation.getSubcomponentName(resolvedBindings.key())));
 
       case MULTIBOUND_SET:
         return Optional.of(
             new SetBindingExpression(
-                resolvedBindings, generatedComponentModel, graph, this, types, elements));
+                resolvedBindings, componentImplementation, graph, this, types, elements));
 
       case MULTIBOUND_MAP:
         return Optional.of(
             new MapBindingExpression(
-                resolvedBindings, generatedComponentModel, graph, this, types, elements));
+                resolvedBindings, componentImplementation, graph, this, types, elements));
 
       case OPTIONAL:
         return Optional.of(new OptionalBindingExpression(resolvedBindings, this, types));
@@ -884,7 +586,7 @@ final class ComponentBindingExpressions {
             new ComponentRequirementBindingExpression(
                 resolvedBindings,
                 ComponentRequirement.forBoundInstance(resolvedBindings.contributionBinding()),
-                componentRequirementFields));
+                componentRequirementExpressions));
 
       case INJECTION:
       case PROVISION:
@@ -894,13 +596,11 @@ final class ComponentBindingExpressions {
                 compilerOptions,
                 this,
                 membersInjectionMethods,
-                componentRequirementFields,
+                componentRequirementExpressions,
+                types,
                 elements));
 
       case MEMBERS_INJECTOR:
-      case RELEASABLE_REFERENCE_MANAGER:
-      case RELEASABLE_REFERENCE_MANAGERS:
-        // TODO(dpb): Implement direct expressions for these.
         return Optional.empty();
 
       case MEMBERS_INJECTION:
@@ -932,22 +632,20 @@ final class ComponentBindingExpressions {
    * we can.
    *
    * <p>In fastInit mode, we can use a direct expression even if the binding {@linkplain
-   * #needsCaching(ResolvedBindings) needs to be cached} as long as it's not in a
-   * reference-releasing scope.
+   * #needsCaching(ResolvedBindings) needs to be cached}.
    */
   private boolean canUseDirectInstanceExpression(ResolvedBindings resolvedBindings) {
-    return !needsCaching(resolvedBindings)
-        || (compilerOptions.fastInit() && !requiresReleasableReferences(resolvedBindings));
+    return !needsCaching(resolvedBindings) || compilerOptions.fastInit();
   }
 
   /**
    * Returns a binding expression that uses a given one as the body of a method that users call. If
    * a component provision method matches it, it will be the method implemented. If it does not
-   * match a component provision method and the binding is modifiable the a new public modifiable
-   * binding method will be written. If the binding doesn't match a component method nor is it
+   * match a component provision method and the binding is modifiable, then a new public modifiable
+   * binding method will be written. If the binding doesn't match a component method and is not
    * modifiable, then a new private method will be written.
    */
-  private BindingExpression wrapInMethod(
+  BindingExpression wrapInMethod(
       ResolvedBindings resolvedBindings,
       BindingRequest request,
       BindingExpression bindingExpression) {
@@ -956,88 +654,49 @@ final class ComponentBindingExpressions {
       return bindingExpression;
     }
 
+    ContributionBinding binding = resolvedBindings.contributionBinding();
     BindingMethodImplementation methodImplementation =
         methodImplementation(resolvedBindings, request, bindingExpression);
     Optional<ComponentMethodDescriptor> matchingComponentMethod =
-        findMatchingComponentMethod(request);
+        graph.componentDescriptor().firstMatchingComponentMethod(request);
 
-    ModifiableBindingType modifiableBindingType = getModifiableBindingType(request);
-    if (shouldUseAModifiableConcreteMethodBindingExpression(
-        modifiableBindingType, matchingComponentMethod)) {
-      return new ModifiableConcreteMethodBindingExpression(
-          resolvedBindings,
-          request,
-          modifiableBindingType,
-          methodImplementation,
-          generatedComponentModel,
-          generatedComponentModel.getModifiableBindingMethod(request),
-          newModifiableBindingWillBeFinalized(modifiableBindingType, request));
+    if (modifiableBindingExpressions.getModifiableBindingType(request).isModifiable()
+        && (componentImplementation.superclassImplementation().isPresent()
+            || !matchingComponentMethod.isPresent())) {
+      return modifiableBindingExpressions.wrapInModifiableMethodBindingExpression(
+          binding, request, methodImplementation);
+    } else if (matchingComponentMethod.isPresent()) {
+      ComponentMethodDescriptor componentMethod = matchingComponentMethod.get();
+      return new ComponentMethodBindingExpression(
+          request, methodImplementation, componentImplementation, componentMethod, types);
+    } else {
+      return new PrivateMethodBindingExpression(
+          binding, request, methodImplementation, componentImplementation, types);
     }
-
-    return matchingComponentMethod
-        .<BindingExpression>map(
-            componentMethod ->
-                new ComponentMethodBindingExpression(
-                    methodImplementation, generatedComponentModel, componentMethod))
-        .orElseGet(
-            () ->
-                new PrivateMethodBindingExpression(
-                    resolvedBindings, request, methodImplementation, generatedComponentModel));
   }
 
-  /**
-   * Returns true if we should wrap a binding expression using a {@link
-   * ModifiableConcreteMethodBindingExpression}. If we're generating the abstract base class of a
-   * subcomponent and the binding matches a component method, even if it is modifiable, then it
-   * should be "wrapped" by a {@link ComponentMethodBindingExpression}. If it isn't a base class
-   * then modifiable methods should be handled by a {@link
-   * ModifiableConcreteMethodBindingExpression}. When generating an inner subcomponent it doesn't
-   * matter whether the binding matches a component method: All modifiable bindings should be
-   * handled by a {@link ModifiableConcreteMethodBindingExpression}.
-   */
-  private boolean shouldUseAModifiableConcreteMethodBindingExpression(
-      ModifiableBindingType type, Optional<ComponentMethodDescriptor> matchingComponentMethod) {
-    return type.isModifiable()
-        && (generatedComponentModel.supermodel().isPresent()
-            || !matchingComponentMethod.isPresent());
-  }
-
-  /** Returns the first component method associated with this request kind, if one exists. */
-  private Optional<ComponentMethodDescriptor> findMatchingComponentMethod(BindingRequest request) {
-    return graph.componentDescriptor().componentMethods().stream()
-        .filter(method -> doesComponentMethodMatch(method, request))
-        .findFirst();
-  }
-
-  /** Returns true if the component method matches the binding request. */
-  private boolean doesComponentMethodMatch(
-      ComponentMethodDescriptor componentMethod, BindingRequest request) {
-    return componentMethod
-        .dependencyRequest()
-        .map(BindingRequest::forDependencyRequest)
-        .filter(request::equals)
-        .isPresent();
-  }
-
+  // TODO(ronshapiro): pass ContributionBinding directly instead of ResolvedBindings. The
+  // ResolvedBindings type is only needed in one case, and it seems like it could be removed.
   private BindingMethodImplementation methodImplementation(
       ResolvedBindings resolvedBindings,
       BindingRequest request,
       BindingExpression bindingExpression) {
+    ContributionBinding binding = resolvedBindings.contributionBinding();
     if (compilerOptions.fastInit()) {
       if (request.isRequestKind(RequestKind.PROVIDER)) {
         return new SingleCheckedMethodImplementation(
-            resolvedBindings, request, bindingExpression, types, generatedComponentModel);
+            componentImplementation, resolvedBindings, request, bindingExpression, types);
       } else if (request.isRequestKind(RequestKind.INSTANCE) && needsCaching(resolvedBindings)) {
         return resolvedBindings.scope().get().isReusable()
             ? new SingleCheckedMethodImplementation(
-                resolvedBindings, request, bindingExpression, types, generatedComponentModel)
+                componentImplementation, resolvedBindings, request, bindingExpression, types)
             : new DoubleCheckedMethodImplementation(
-                resolvedBindings, request, bindingExpression, types, generatedComponentModel);
+                componentImplementation, binding, request, bindingExpression, types);
       }
     }
 
     return new BindingMethodImplementation(
-        resolvedBindings, request, bindingExpression, generatedComponentModel.name(), types);
+        componentImplementation, binding, request, bindingExpression, types);
   }
 
   /**
@@ -1054,12 +713,5 @@ final class ComponentBindingExpressions {
       return isBindsScopeStrongerThanDependencyScope(resolvedBindings, graph);
     }
     return true;
-  }
-
-  // TODO(user): Enable releasable references in fastInit
-  private boolean requiresReleasableReferences(ResolvedBindings resolvedBindings) {
-    return resolvedBindings.scope().isPresent()
-        && referenceReleasingManagerFields.requiresReleasableReferences(
-            resolvedBindings.scope().get());
   }
 }

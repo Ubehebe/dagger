@@ -20,7 +20,7 @@ import static dagger.internal.codegen.DaggerStreams.instancesOf;
 import static javax.tools.Diagnostic.Kind.ERROR;
 
 import dagger.model.BindingGraph;
-import dagger.model.BindingGraph.BindingNode;
+import dagger.model.BindingGraph.MaybeBinding;
 import dagger.model.Key;
 import dagger.spi.BindingGraphPlugin;
 import dagger.spi.DiagnosticReporter;
@@ -54,17 +54,16 @@ final class DependsOnProductionExecutorValidator implements BindingGraphPlugin {
     Key productionImplementationExecutorKey = keyFactory.forProductionImplementationExecutor();
     Key productionExecutorKey = keyFactory.forProductionExecutor();
 
-    bindingGraph.bindingNodes(productionExecutorKey).stream()
-        .flatMap(
-            productionExecutorBinding ->
-                bindingGraph.predecessors(productionExecutorBinding).stream())
-        .flatMap(instancesOf(BindingNode.class))
+    bindingGraph.network().nodes().stream()
+        .flatMap(instancesOf(MaybeBinding.class))
+        .filter(node -> node.key().equals(productionExecutorKey))
+        .flatMap(productionExecutor -> bindingGraph.requestingBindings(productionExecutor).stream())
         .filter(binding -> !binding.key().equals(productionImplementationExecutorKey))
         .forEach(binding -> reportError(diagnosticReporter, binding));
   }
 
-  private void reportError(DiagnosticReporter diagnosticReporter, BindingNode bindingNode) {
+  private void reportError(DiagnosticReporter diagnosticReporter, dagger.model.Binding binding) {
     diagnosticReporter.reportBinding(
-        ERROR, bindingNode, "%s may not depend on the production executor", bindingNode.key());
+        ERROR, binding, "%s may not depend on the production executor", binding.key());
   }
 }

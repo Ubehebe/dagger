@@ -68,13 +68,13 @@ public final class DuplicateAndroidInjectorsCheckerTest {
             "interface TestModule {",
             "  @Binds",
             "  @IntoMap",
-            "  @ActivityKey(TestActivity.class)",
-            "  AndroidInjector.Factory<? extends Activity> classKey(TestInjectorFactory factory);",
+            "  @ClassKey(TestActivity.class)",
+            "  AndroidInjector.Factory<?> classKey(TestInjectorFactory factory);",
             "",
             "  @Binds",
             "  @IntoMap",
             "  @AndroidInjectionKey(\"test.TestActivity\")",
-            "  AndroidInjector.Factory<? extends Activity> stringKey(TestInjectorFactory factory);",
+            "  AndroidInjector.Factory<?> stringKey(TestInjectorFactory factory);",
             "}");
     JavaFileObject component =
         JavaFileObjects.forSourceLines(

@@ -18,7 +18,7 @@ package dagger.internal.codegen;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static dagger.internal.codegen.AnnotationSpecs.Suppression.RAWTYPES;
-import static dagger.internal.codegen.GeneratedComponentModel.FieldSpecKind.FRAMEWORK_FIELD;
+import static dagger.internal.codegen.ComponentImplementation.FieldSpecKind.FRAMEWORK_FIELD;
 import static javax.lang.model.element.Modifier.PRIVATE;
 
 import com.squareup.javapoet.ClassName;
@@ -26,6 +26,7 @@ import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.TypeName;
 import dagger.internal.DelegateFactory;
+import dagger.producers.internal.DelegateProducer;
 import java.util.Optional;
 
 /**
@@ -71,17 +72,17 @@ class FrameworkFieldInitializer implements FrameworkInstanceSupplier {
     }
   }
 
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
   private final ResolvedBindings resolvedBindings;
   private final FrameworkInstanceCreationExpression frameworkInstanceCreationExpression;
   private FieldSpec fieldSpec;
   private InitializationState fieldInitializationState = InitializationState.UNINITIALIZED;
 
   FrameworkFieldInitializer(
-      GeneratedComponentModel generatedComponentModel,
+      ComponentImplementation componentImplementation,
       ResolvedBindings resolvedBindings,
       FrameworkInstanceCreationExpression frameworkInstanceCreationExpression) {
-    this.generatedComponentModel = checkNotNull(generatedComponentModel);
+    this.componentImplementation = checkNotNull(componentImplementation);
     this.resolvedBindings = checkNotNull(resolvedBindings);
     this.frameworkInstanceCreationExpression = checkNotNull(frameworkInstanceCreationExpression);
   }
@@ -93,7 +94,7 @@ class FrameworkFieldInitializer implements FrameworkInstanceSupplier {
   @Override
   public final MemberSelect memberSelect() {
     initializeField();
-    return MemberSelect.localField(generatedComponentModel.name(), checkNotNull(fieldSpec).name);
+    return MemberSelect.localField(componentImplementation.name(), checkNotNull(fieldSpec).name);
   }
 
   /** Adds the field and its initialization code to the component. */
@@ -106,18 +107,14 @@ class FrameworkFieldInitializer implements FrameworkInstanceSupplier {
         CodeBlock fieldInitialization = frameworkInstanceCreationExpression.creationExpression();
         CodeBlock initCode = CodeBlock.of("this.$N = $L;", getOrCreateField(), fieldInitialization);
 
-        if (fieldInitializationState == InitializationState.DELEGATED) {
-          // If we were recursively invoked, set the delegate factory as part of our initialization
-          CodeBlock delegateFactoryVariable = CodeBlock.of("$NDelegate", fieldSpec);
-          codeBuilder
-              .add(
-                  "$1T $2L = ($1T) $3N;", DelegateFactory.class, delegateFactoryVariable, fieldSpec)
-              .add(initCode)
-              .add("$L.setDelegatedProvider($N);", delegateFactoryVariable, fieldSpec);
+        if (isReplacingSuperclassFrameworkInstance()
+            || fieldInitializationState == InitializationState.DELEGATED) {
+          codeBuilder.add(
+              "$T.setDelegate($N, $L);", delegateType(), fieldSpec, fieldInitialization);
         } else {
           codeBuilder.add(initCode);
         }
-        generatedComponentModel.addInitialization(codeBuilder.build());
+        componentImplementation.addInitialization(codeBuilder.build());
 
         fieldInitializationState = InitializationState.INITIALIZED;
         break;
@@ -125,8 +122,8 @@ class FrameworkFieldInitializer implements FrameworkInstanceSupplier {
       case INITIALIZING:
         // We were recursively invoked, so create a delegate factory instead
         fieldInitializationState = InitializationState.DELEGATED;
-        generatedComponentModel.addInitialization(
-            CodeBlock.of("this.$N = new $T<>();", getOrCreateField(), DelegateFactory.class));
+        componentImplementation.addInitialization(
+            CodeBlock.of("this.$N = new $T<>();", getOrCreateField(), delegateType()));
         break;
 
       case DELEGATED:
@@ -146,35 +143,76 @@ class FrameworkFieldInitializer implements FrameworkInstanceSupplier {
     if (fieldSpec != null) {
       return fieldSpec;
     }
-    boolean useRawType = !generatedComponentModel.isTypeAccessible(resolvedBindings.key().type());
+    boolean useRawType = !componentImplementation.isTypeAccessible(resolvedBindings.key().type());
     FrameworkField contributionBindingField =
         FrameworkField.forResolvedBindings(
             resolvedBindings, frameworkInstanceCreationExpression.alternativeFrameworkClass());
 
     TypeName fieldType;
-    if (!fieldInitializationState.equals(InitializationState.DELEGATED)
+    boolean rawTypeUsed = false;
+    if (!isReplacingSuperclassFrameworkInstance()
+        && !fieldInitializationState.equals(InitializationState.DELEGATED)
         && specificType().isPresent()) {
       // For some larger components, this causes javac to compile much faster by getting the
       // field type to exactly match the type of the expression being assigned to it.
       fieldType = specificType().get();
     } else if (useRawType) {
       fieldType = contributionBindingField.type().rawType;
+      rawTypeUsed = true;
     } else {
       fieldType = contributionBindingField.type();
     }
 
     FieldSpec.Builder contributionField =
         FieldSpec.builder(
-            fieldType,
-            generatedComponentModel.getUniqueFieldName(contributionBindingField.name()));
+            fieldType, componentImplementation.getUniqueFieldName(contributionBindingField.name()));
     contributionField.addModifiers(PRIVATE);
-    if (useRawType && !specificType().isPresent()) {
+    if (rawTypeUsed) {
       contributionField.addAnnotation(AnnotationSpecs.suppressWarnings(RAWTYPES));
     }
+
+    if (isReplacingSuperclassFrameworkInstance()) {
+      // If a binding is modified in a subclass, the framework instance will be replaced in the
+      // subclass implementation. The superclass framework instance initialization will run first,
+      // however, and may refer to the modifiable binding method returning this type's modified
+      // framework instance before it is initialized, so we use a delegate factory as a placeholder
+      // until it has properly been initialized.
+      contributionField.initializer("new $T<>()", delegateType());
+    }
+
     fieldSpec = contributionField.build();
-    generatedComponentModel.addField(FRAMEWORK_FIELD, fieldSpec);
+    componentImplementation.addField(FRAMEWORK_FIELD, fieldSpec);
 
     return fieldSpec;
+  }
+
+  /**
+   * Returns true if this framework field is replacing a superclass's implementation of the
+   * framework field.
+   */
+  private boolean isReplacingSuperclassFrameworkInstance() {
+    return componentImplementation
+        .superclassImplementation()
+        .flatMap(
+            superclassImplementation ->
+                // TODO(b/117833324): can we constrain this further?
+                superclassImplementation.getModifiableBindingMethod(
+                    BindingRequest.bindingRequest(
+                        resolvedBindings.key(),
+                        isProvider() ? FrameworkType.PROVIDER : FrameworkType.PRODUCER_NODE)))
+        .isPresent();
+  }
+
+  private Class<?> delegateType() {
+    return isProvider() ? DelegateFactory.class : DelegateProducer.class;
+  }
+
+  private boolean isProvider() {
+    return resolvedBindings.bindingType().equals(BindingType.PROVISION)
+        && frameworkInstanceCreationExpression
+            .alternativeFrameworkClass()
+            .map(TypeNames.PROVIDER::equals)
+            .orElse(true);
   }
 
   /** Returns the type of the instance when it is a specific factory type. */

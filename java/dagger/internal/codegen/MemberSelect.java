@@ -18,7 +18,7 @@ package dagger.internal.codegen;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static dagger.internal.codegen.Accessibility.isTypeAccessibleFrom;
-import static dagger.internal.codegen.CodeBlocks.toTypeNamesCodeBlock;
+import static dagger.internal.codegen.CodeBlocks.toParametersCodeBlock;
 import static dagger.internal.codegen.ContributionBinding.FactoryCreationStrategy.SINGLETON_INSTANCE;
 import static dagger.internal.codegen.SourceFiles.bindingTypeElementTypeVariableNames;
 import static dagger.internal.codegen.SourceFiles.generatedClassNameForBinding;
@@ -34,7 +34,6 @@ import com.google.auto.common.MoreTypes;
 import com.google.common.collect.ImmutableList;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
-import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeVariableName;
 import java.util.List;
 import java.util.Optional;
@@ -68,8 +67,35 @@ abstract class MemberSelect {
     @Override
     CodeBlock getExpressionFor(ClassName usingClass) {
       return owningClass().equals(usingClass)
-          ? CodeBlock.of("$L", fieldName)
-          : CodeBlock.of("$T.this.$L", owningClass(), fieldName);
+          ? CodeBlock.of("$N", fieldName)
+          : CodeBlock.of("$T.this.$N", owningClass(), fieldName);
+    }
+  }
+
+  /**
+   * Returns a {@link MemberSelect} that accesses the method given by {@code methodName} owned by
+   * {@code owningClass}. In this context "local" refers to the fact that the method is owned by the
+   * type (or an enclosing type) from which the code block will be used. The returned {@link
+   * MemberSelect} will not be valid for accessing the method from a different class (regardless of
+   * accessibility).
+   */
+  static MemberSelect localMethod(ClassName owningClass, String methodName) {
+    return new LocalMethod(owningClass, methodName);
+  }
+
+  private static final class LocalMethod extends MemberSelect {
+    final String methodName;
+
+    LocalMethod(ClassName owningClass, String methodName) {
+      super(owningClass, false);
+      this.methodName = checkNotNull(methodName);
+    }
+
+    @Override
+    CodeBlock getExpressionFor(ClassName usingClass) {
+      return owningClass().equals(usingClass)
+          ? CodeBlock.of("$N()", methodName)
+          : CodeBlock.of("$T.this.$N()", owningClass(), methodName);
     }
   }
 
@@ -210,7 +236,7 @@ abstract class MemberSelect {
         return CodeBlock.of(
             "$T.<$L>$L",
             owningClass(),
-            typeParameters.stream().map(TypeName::get).collect(toTypeNamesCodeBlock()),
+            typeParameters.stream().map(CodeBlocks::type).collect(toParametersCodeBlock()),
             methodCodeBlock);
       } else {
         return CodeBlock.of("(($T) $T.$L)", rawReturnType, owningClass(), methodCodeBlock);

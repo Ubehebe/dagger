@@ -16,7 +16,8 @@
 
 package dagger.internal.codegen;
 
-import static dagger.internal.codegen.GeneratedComponentModel.FieldSpecKind.PRIVATE_METHOD_SCOPED_FIELD;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static dagger.internal.codegen.ComponentImplementation.FieldSpecKind.PRIVATE_METHOD_SCOPED_FIELD;
 import static javax.lang.model.element.Modifier.PRIVATE;
 import static javax.lang.model.element.Modifier.VOLATILE;
 
@@ -34,23 +35,23 @@ import dagger.internal.MemoizedSentinel;
  */
 final class DoubleCheckedMethodImplementation extends BindingMethodImplementation {
 
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
   private final ContributionBinding binding;
   private final Supplier<String> fieldName = Suppliers.memoize(this::createField);
 
   DoubleCheckedMethodImplementation(
-      ResolvedBindings resolvedBindings,
+      ComponentImplementation component,
+      ContributionBinding binding,
       BindingRequest request,
       BindingExpression bindingExpression,
-      DaggerTypes types,
-      GeneratedComponentModel generatedComponentModel) {
-    super(resolvedBindings, request, bindingExpression, generatedComponentModel.name(), types);
-    this.generatedComponentModel = generatedComponentModel;
-    this.binding = resolvedBindings.contributionBinding();
+      DaggerTypes types) {
+    super(component, binding, request, bindingExpression, types);
+    this.componentImplementation = checkNotNull(component);
+    this.binding = checkNotNull(binding);
   }
 
   @Override
-  CodeBlock body() {
+  CodeBlock implementation(Supplier<CodeBlock> simpleBindingExpression) {
     String fieldExpression = fieldName.get().equals("local") ? "this.local" : fieldName.get();
     return CodeBlock.builder()
         .addStatement("$T local = $L", TypeName.OBJECT, fieldExpression)
@@ -58,7 +59,7 @@ final class DoubleCheckedMethodImplementation extends BindingMethodImplementatio
         .beginControlFlow("synchronized (local)")
         .addStatement("local = $L", fieldExpression)
         .beginControlFlow("if (local instanceof $T)", MemoizedSentinel.class)
-        .addStatement("local = $L", simpleBindingExpression())
+        .addStatement("local = $L", simpleBindingExpression.get())
         .addStatement("$1L = $2T.reentrantCheck($1L, local)", fieldExpression, DoubleCheck.class)
         .endControlFlow()
         .endControlFlow()
@@ -68,8 +69,8 @@ final class DoubleCheckedMethodImplementation extends BindingMethodImplementatio
   }
 
   private String createField() {
-    String name = generatedComponentModel.getUniqueFieldName(BindingVariableNamer.name(binding));
-    generatedComponentModel.addField(
+    String name = componentImplementation.getUniqueFieldName(BindingVariableNamer.name(binding));
+    componentImplementation.addField(
         PRIVATE_METHOD_SCOPED_FIELD,
         FieldSpec.builder(TypeName.OBJECT, name, PRIVATE, VOLATILE)
             .initializer("new $T()", MemoizedSentinel.class)

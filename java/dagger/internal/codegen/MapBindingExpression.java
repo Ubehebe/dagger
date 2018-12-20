@@ -19,6 +19,7 @@ package dagger.internal.codegen;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static dagger.internal.codegen.Accessibility.isTypeAccessibleFrom;
+import static dagger.internal.codegen.BindingRequest.bindingRequest;
 import static dagger.internal.codegen.CodeBlocks.toParametersCodeBlock;
 import static dagger.internal.codegen.MapKeys.getMapKeyExpression;
 import static dagger.model.BindingKind.MULTIBOUND_MAP;
@@ -49,12 +50,12 @@ final class MapBindingExpression extends MultibindingExpression {
 
   MapBindingExpression(
       ResolvedBindings resolvedBindings,
-      GeneratedComponentModel generatedComponentModel,
+      ComponentImplementation componentImplementation,
       BindingGraph graph,
       ComponentBindingExpressions componentBindingExpressions,
       DaggerTypes types,
       DaggerElements elements) {
-    super(resolvedBindings, generatedComponentModel);
+    super(resolvedBindings, componentImplementation);
     this.binding = (ProvisionBinding) resolvedBindings.contributionBinding();
     BindingKind bindingKind = this.binding.kind();
     checkArgument(bindingKind.equals(MULTIBOUND_MAP), bindingKind);
@@ -134,7 +135,7 @@ final class MapBindingExpression extends MultibindingExpression {
         "$L, $L",
         getMapKeyExpression(dependencies.get(dependency), requestingClass, elements),
         componentBindingExpressions
-            .getDependencyExpression(dependency, requestingClass)
+            .getDependencyExpression(bindingRequest(dependency), requestingClass)
             .codeBlock());
   }
 

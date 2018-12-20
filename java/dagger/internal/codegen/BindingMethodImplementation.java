@@ -17,32 +17,45 @@
 package dagger.internal.codegen;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static dagger.internal.codegen.RequestKinds.requestType;
 
-import com.squareup.javapoet.ClassName;
+import com.google.common.base.Supplier;
 import com.squareup.javapoet.CodeBlock;
+import dagger.internal.codegen.ComponentDescriptor.ComponentMethodDescriptor;
 import dagger.model.RequestKind;
+import java.util.Optional;
 import javax.lang.model.type.TypeMirror;
 
 /** Defines a method body and return type for a given {@link BindingExpression}. */
 class BindingMethodImplementation {
+  private final ComponentImplementation component;
   private final ContributionBinding binding;
   private final BindingRequest request;
   private final BindingExpression bindingExpression;
-  private final ClassName componentName;
   private final DaggerTypes types;
 
   BindingMethodImplementation(
-      ResolvedBindings resolvedBindings,
+      ComponentImplementation component,
+      ContributionBinding binding,
       BindingRequest request,
       BindingExpression bindingExpression,
-      ClassName componentName,
       DaggerTypes types) {
-    this.binding = resolvedBindings.contributionBinding();
-    this.request = checkNotNull(request);
+    this.component = component;
+    this.binding = binding;
+    this.request = request;
     this.bindingExpression = checkNotNull(bindingExpression);
-    this.componentName = checkNotNull(componentName);
-    this.types = checkNotNull(types);
+    this.types = types;
+  }
+
+  /** The method's body. */
+  final CodeBlock body() {
+    return implementation(bindingExpression.getDependencyExpression(component.name())::codeBlock);
+  }
+
+  /** The method's body if this method is a component method. */
+  final CodeBlock bodyForComponentMethod(ComponentMethodDescriptor componentMethod) {
+    return implementation(
+        bindingExpression.getDependencyExpressionForComponentMethod(componentMethod, component)
+            ::codeBlock);
   }
 
   /**
@@ -50,14 +63,12 @@ class BindingMethodImplementation {
    *
    * <p>If the implementation has a non-void return type, the body will also include the {@code
    * return} statement.
+   *
+   * @param simpleBindingExpression the expression to retrieve an instance of this binding without
+   *     the wrapping method.
    */
-  CodeBlock body() {
-    return CodeBlock.of("return $L;", simpleBindingExpression());
-  }
-
-  /** Returns the code for the binding expression. */
-  protected final CodeBlock simpleBindingExpression() {
-    return bindingExpression.getDependencyExpression(componentName).codeBlock();
+  CodeBlock implementation(Supplier<CodeBlock> simpleBindingExpression) {
+    return CodeBlock.of("return $L;", simpleBindingExpression.get());
   }
 
   /** Returns the return type for the dependency request. */
@@ -66,14 +77,25 @@ class BindingMethodImplementation {
         && binding.contributedPrimitiveType().isPresent()) {
       return binding.contributedPrimitiveType().get();
     }
-    return types.accessibleType(requestedType(), componentName);
+
+    if (matchingComponentMethod().isPresent()) {
+      // Component methods are part of the user-defined API, and thus we must use the user-defined
+      // type.
+      return matchingComponentMethod().get().resolvedReturnType(types);
+    }
+
+    // If the component is abstract, this method may be overridden by another implementation in a
+    // different package for which requestedType is inaccessible. In order to make that method
+    // overridable, we use the publicly accessible type. If the type is final, we don't need to 
+    // worry about this, and instead just need to check accessibility of the file we're about to
+    // write
+    TypeMirror requestedType = request.requestedType(binding.contributedType(), types);
+    return component.isAbstract()
+        ? types.publiclyAccessibleType(requestedType)
+        : types.accessibleType(requestedType, component.name());
   }
 
-  private TypeMirror requestedType() {
-    if (request.requestKind().isPresent()) {
-      return requestType(request.requestKind().get(), binding.contributedType(), types);
-    }
-    return types.wrapType(
-        binding.contributedType(), request.frameworkType().get().frameworkClass());
+  private Optional<ComponentMethodDescriptor> matchingComponentMethod() {
+    return component.componentDescriptor().firstMatchingComponentMethod(request);
   }
 }

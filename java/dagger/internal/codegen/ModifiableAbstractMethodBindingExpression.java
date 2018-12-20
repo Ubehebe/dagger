@@ -17,42 +17,44 @@
 package dagger.internal.codegen;
 
 import static javax.lang.model.element.Modifier.ABSTRACT;
-import static javax.lang.model.element.Modifier.PUBLIC;
+import static javax.lang.model.element.Modifier.PROTECTED;
 
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
+import com.squareup.javapoet.TypeName;
 import dagger.internal.codegen.ComponentDescriptor.ComponentMethodDescriptor;
 import dagger.internal.codegen.ModifiableBindingMethods.ModifiableBindingMethod;
 import java.util.Optional;
+import javax.lang.model.type.TypeMirror;
 
 /**
  * A {@link BindingExpression} that invokes a method that encapsulates a binding that cannot be
  * satisfied when generating the abstract base class implementation of a subcomponent. The
- * (unimplemented) method is added to the {@link GeneratedComponentModel} when the dependency
+ * (unimplemented) method is added to the {@link ComponentImplementation} when the dependency
  * expression is requested. The method is overridden when generating the implementation of an
  * ancestor component.
  */
-// TODO(b/72748365): There may be unimplemented abstract binding methods even after considering a
-// complete binding graph: If there are @Provides-over-@Inject bindings then there could be branches
-// of dependencies (of the @Inject binding) that have induced abstract modifiable binding methods
-// that are missing in the full binding graph (given the @Provides binding). Such abstract
-// modifiable methods should be overridden and an exception thrown.
 abstract class ModifiableAbstractMethodBindingExpression extends BindingExpression {
-  private final GeneratedComponentModel generatedComponentModel;
+  private final ComponentImplementation componentImplementation;
   private final ModifiableBindingType modifiableBindingType;
   private final BindingRequest request;
+  private final Optional<ComponentMethodDescriptor> matchingComponentMethod;
+  private final DaggerTypes types;
   private Optional<String> methodName;
 
   ModifiableAbstractMethodBindingExpression(
-      GeneratedComponentModel generatedComponentModel,
+      ComponentImplementation componentImplementation,
       ModifiableBindingType modifiableBindingType,
       BindingRequest request,
       Optional<ModifiableBindingMethod> matchingModifiableBindingMethod,
-      Optional<ComponentMethodDescriptor> matchingComponentMethod) {
-    this.generatedComponentModel = generatedComponentModel;
+      Optional<ComponentMethodDescriptor> matchingComponentMethod,
+      DaggerTypes types) {
+    this.componentImplementation = componentImplementation;
     this.modifiableBindingType = modifiableBindingType;
     this.request = request;
+    this.matchingComponentMethod = matchingComponentMethod;
+    this.types = types;
     this.methodName =
         initializeMethodName(matchingComponentMethod, matchingModifiableBindingMethod);
   }
@@ -77,23 +79,56 @@ abstract class ModifiableAbstractMethodBindingExpression extends BindingExpressi
   @Override
   final Expression getDependencyExpression(ClassName requestingClass) {
     addUnimplementedMethod();
-    return Expression.create(request.key().type(), CodeBlock.of("$L()", methodName.get()));
+    return Expression.create(
+        returnType(),
+        componentImplementation.name().equals(requestingClass)
+            ? CodeBlock.of("$N()", methodName.get())
+            : CodeBlock.of("$T.this.$N()", componentImplementation.name(), methodName.get()));
   }
 
   private void addUnimplementedMethod() {
     if (!methodName.isPresent()) {
       // Only add the method once in case of repeated references to the missing binding.
       methodName = Optional.of(chooseMethodName());
-      generatedComponentModel.addModifiableBindingMethod(
+      TypeMirror returnType = returnType();
+      componentImplementation.addModifiableBindingMethod(
           modifiableBindingType,
           request,
+          returnType,
           MethodSpec.methodBuilder(methodName.get())
-              .addModifiers(PUBLIC, ABSTRACT)
-              .returns(request.typeName())
+              .addModifiers(PROTECTED, ABSTRACT)
+              .returns(TypeName.get(returnType))
               .build(),
           false /* finalized */);
     }
   }
+
+  /**
+   * The return type of this abstract method expression:
+   *
+   * <ul>
+   *   <li>If there's a {@code matchingComponentMethod}, use its return type.
+   *   <li>Otherwise, use the {@linkplain DaggerTypes#publiclyAccessibleType(TypeMirror) publicly
+   *       accessible type} of the request. We can't use the {@linkplain
+   *       Accessibility#isTypeAccessibleFrom(TypeMirror, String) type accessible from the current
+   *       implementation's package} because a subclass implementation may be in a different package
+   *       from which the request type is not accessible.
+   * </ul>
+   */
+  private TypeMirror returnType() {
+    if (matchingComponentMethod.isPresent()) {
+      return matchingComponentMethod.get().resolvedReturnType(types);
+    }
+
+    TypeMirror requestedType = request.requestedType(contributedType(), types);
+    return types.publiclyAccessibleType(requestedType);
+  }
+
+  /**
+   * The {@link ContributionBinding#contributedType() type contributed} by the binding of this
+   * expression. For missing bindings, this will be the key type.
+   */
+  protected abstract TypeMirror contributedType();
 
   /** Returns a unique 'getter' method name for the current component. */
   abstract String chooseMethodName();

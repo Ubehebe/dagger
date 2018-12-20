@@ -49,12 +49,12 @@ public final class DispatchingAndroidInjector<T> implements AndroidInjector<T> {
       "No injector factory bound for Class<%1$s>. Injector factories were bound for supertypes "
           + "of %1$s: %2$s. Did you mean to bind an injector factory for the subtype?";
 
-  private final Map<String, Provider<AndroidInjector.Factory<? extends T>>> injectorFactories;
+  private final Map<String, Provider<AndroidInjector.Factory<?>>> injectorFactories;
 
   @Inject
   DispatchingAndroidInjector(
-      Map<Class<? extends T>, Provider<Factory<? extends T>>> injectorFactoriesWithClassKeys,
-      Map<String, Provider<Factory<? extends T>>> injectorFactoriesWithStringKeys) {
+      Map<Class<?>, Provider<AndroidInjector.Factory<?>>> injectorFactoriesWithClassKeys,
+      Map<String, Provider<AndroidInjector.Factory<?>>> injectorFactoriesWithStringKeys) {
     this.injectorFactories = merge(injectorFactoriesWithClassKeys, injectorFactoriesWithStringKeys);
   }
 
@@ -68,10 +68,12 @@ public final class DispatchingAndroidInjector<T> implements AndroidInjector<T> {
    * <p>Ideally we could achieve this with a generic {@code @Provides} method, but we'd need to have
    * <i>N</i> modules that each extend one base module.
    */
-  private static <C, V> Map<String, V> merge(
+  private static <C, V> Map<String, Provider<AndroidInjector.Factory<?>>> merge(
       Map<Class<? extends C>, V> classKeyedMap, Map<String, V> stringKeyedMap) {
     if (classKeyedMap.isEmpty()) {
-      return stringKeyedMap;
+      @SuppressWarnings({"unchecked", "rawtypes"})
+      Map<String, Provider<AndroidInjector.Factory<?>>> safeCast = (Map) stringKeyedMap;
+      return safeCast;
     }
 
     Map<String, V> merged =
@@ -81,7 +83,9 @@ public final class DispatchingAndroidInjector<T> implements AndroidInjector<T> {
       merged.put(entry.getKey().getName(), entry.getValue());
     }
 
-    return Collections.unmodifiableMap(merged);
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    Map<String, Provider<AndroidInjector.Factory<?>>> safeCast = (Map) merged;
+    return Collections.unmodifiableMap(safeCast);
   }
 
   /**
@@ -93,7 +97,7 @@ public final class DispatchingAndroidInjector<T> implements AndroidInjector<T> {
    */
   @CanIgnoreReturnValue
   public boolean maybeInject(T instance) {
-    Provider<AndroidInjector.Factory<? extends T>> factoryProvider =
+    Provider<AndroidInjector.Factory<?>> factoryProvider =
         injectorFactories.get(instance.getClass().getName());
     if (factoryProvider == null) {
       return false;

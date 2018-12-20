@@ -61,7 +61,11 @@ final class SubcomponentFactoryMethodValidator implements BindingGraphPlugin {
 
   @Override
   public void visitGraph(BindingGraph bindingGraph, DiagnosticReporter diagnosticReporter) {
-    bindingGraph.edges().stream()
+    if (bindingGraph.isModuleBindingGraph() || bindingGraph.isPartialBindingGraph()) {
+      // We don't know all the modules that might be owned by the child until we know the root.
+      return;
+    }
+    bindingGraph.network().edges().stream()
         .flatMap(instancesOf(ChildFactoryMethodEdge.class))
         .forEach(
             edge -> {
@@ -77,17 +81,14 @@ final class SubcomponentFactoryMethodValidator implements BindingGraphPlugin {
       ChildFactoryMethodEdge edge, BindingGraph graph) {
     ImmutableSet<TypeElement> factoryMethodParameters =
         subgraphFactoryMethodParameters(edge, graph);
-    ComponentNode child = (ComponentNode) graph.incidentNodes(edge).target();
+    ComponentNode child = (ComponentNode) graph.network().incidentNodes(edge).target();
     SetView<TypeElement> modulesOwnedByChild = ownedModules(child, graph);
-    return graph.bindingNodes().stream()
+    return graph.bindings().stream()
         // bindings owned by child
-        .filter(node -> node.componentPath().equals(child.componentPath()))
+        .filter(binding -> binding.componentPath().equals(child.componentPath()))
         // that require a module instance
-        .filter(
-            node ->
-                node.binding() instanceof ContributionBinding
-                    && ((ContributionBinding) node.binding()).requiresModuleInstance())
-        .map(node -> node.binding().contributingModule().get())
+        .filter(binding -> binding.requiresModuleInstance())
+        .map(binding -> binding.contributingModule().get())
         .distinct()
         // module owned by child
         .filter(module -> modulesOwnedByChild.contains(module))
@@ -100,7 +101,7 @@ final class SubcomponentFactoryMethodValidator implements BindingGraphPlugin {
 
   private ImmutableSet<TypeElement> subgraphFactoryMethodParameters(
       ChildFactoryMethodEdge edge, BindingGraph bindingGraph) {
-    ComponentNode parent = (ComponentNode) bindingGraph.incidentNodes(edge).source();
+    ComponentNode parent = (ComponentNode) bindingGraph.network().incidentNodes(edge).source();
     DeclaredType parentType = asDeclared(parent.componentPath().currentComponent().asType());
     ExecutableType factoryMethodType =
         asExecutable(types.asMemberOf(parentType, edge.factoryMethod()));
@@ -109,7 +110,7 @@ final class SubcomponentFactoryMethodValidator implements BindingGraphPlugin {
 
   private SetView<TypeElement> ownedModules(ComponentNode component, BindingGraph graph) {
     return Sets.difference(
-        ((ComponentNodeImpl) component).componentDescriptor().transitiveModuleTypes(),
+        ((ComponentNodeImpl) component).componentDescriptor().moduleTypes(),
         inheritedModules(component, graph));
   }
 
@@ -138,7 +139,13 @@ final class SubcomponentFactoryMethodValidator implements BindingGraphPlugin {
         edge,
         "%s requires modules which have no visible default constructors. "
             + "Add the following modules as parameters to this method: %s",
-        graph.incidentNodes(edge).target().componentPath().currentComponent().getQualifiedName(),
+        graph
+            .network()
+            .incidentNodes(edge)
+            .target()
+            .componentPath()
+            .currentComponent()
+            .getQualifiedName(),
         Joiner.on(", ").join(missingModules));
   }
 }

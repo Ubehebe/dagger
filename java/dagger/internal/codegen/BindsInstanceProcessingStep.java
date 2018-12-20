@@ -22,20 +22,17 @@ import static dagger.internal.codegen.ConfigurationAnnotations.getModuleAnnotati
 import static dagger.internal.codegen.DaggerElements.isAnyAnnotationPresent;
 import static dagger.internal.codegen.DaggerStreams.toImmutableSet;
 import static dagger.internal.codegen.MoreAnnotationMirrors.simpleName;
+import static java.util.Arrays.stream;
 import static javax.lang.model.element.Modifier.ABSTRACT;
 
-import com.google.auto.common.BasicAnnotationProcessor.ProcessingStep;
 import com.google.auto.common.MoreElements;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.SetMultimap;
 import dagger.BindsInstance;
 import java.lang.annotation.Annotation;
 import java.util.Set;
-import java.util.stream.Stream;
 import javax.annotation.processing.Messager;
 import javax.inject.Inject;
 import javax.lang.model.element.AnnotationMirror;
-import javax.lang.model.element.Element;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
@@ -44,21 +41,22 @@ import javax.lang.model.element.VariableElement;
  * Processing step that validates that the {@code BindsInstance} annotation is applied to the
  * correct elements.
  */
-final class BindsInstanceProcessingStep implements ProcessingStep {
+final class BindsInstanceProcessingStep extends TypeCheckingProcessingStep<ExecutableElement> {
 
   private static final ImmutableSet<Class<? extends Annotation>> COMPONENT_ANNOTATIONS =
-      Stream.of(ComponentDescriptor.Kind.values())
-          .map(ComponentDescriptor.Kind::annotationType)
+      stream(ComponentKind.values())
+          .filter(kind -> !kind.isForModuleValidation())
+          .map(ComponentKind::annotation)
           .collect(toImmutableSet());
+
   private static final ImmutableSet<Class<? extends Annotation>> MODULE_ANNOTATIONS =
-      Stream.of(ModuleDescriptor.Kind.values())
-          .map(ModuleDescriptor.Kind::moduleAnnotation)
-          .collect(toImmutableSet());
+      stream(ModuleKind.values()).map(ModuleKind::annotation).collect(toImmutableSet());
 
   private final Messager messager;
 
   @Inject
   BindsInstanceProcessingStep(Messager messager) {
+    super(MoreElements::asExecutable);
     this.messager = messager;
   }
 
@@ -68,10 +66,8 @@ final class BindsInstanceProcessingStep implements ProcessingStep {
   }
 
   @Override
-  public Set<Element> process(
-      SetMultimap<Class<? extends Annotation>, Element> elementsByAnnotation) {
-    for (Element element : elementsByAnnotation.get(BindsInstance.class)) {
-      ExecutableElement method = MoreElements.asExecutable(element);
+  protected void process(
+      ExecutableElement method, ImmutableSet<Class<? extends Annotation>> annotations) {
       ValidationReport.Builder<ExecutableElement> report = ValidationReport.about(method);
       if (!method.getModifiers().contains(ABSTRACT)) {
         report.addError("@BindsInstance methods must be abstract");
@@ -102,7 +98,5 @@ final class BindsInstanceProcessingStep implements ProcessingStep {
                 simpleName(componentAnnotation)));
       }
       report.build().printMessagesTo(messager);
-    }
-    return ImmutableSet.of();
   }
 }

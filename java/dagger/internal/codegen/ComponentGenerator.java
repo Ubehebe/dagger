@@ -16,6 +16,7 @@
 
 package dagger.internal.codegen;
 
+import static com.google.common.base.Verify.verify;
 import static dagger.internal.codegen.SourceFiles.classFileName;
 
 import com.squareup.javapoet.ClassName;
@@ -32,32 +33,21 @@ import javax.lang.model.element.TypeElement;
  * Generates the implementation of the abstract types annotated with {@link Component}.
  */
 final class ComponentGenerator extends SourceFileGenerator<BindingGraph> {
-  private final DaggerTypes types;
-  private final DaggerElements elements;
-  private final KeyFactory keyFactory;
-  private final CompilerOptions compilerOptions;
-  private final BindingGraphFactory bindingGraphFactory;
+  private final ComponentImplementationFactory componentImplementationFactory;
 
   @Inject
   ComponentGenerator(
       Filer filer,
       DaggerElements elements,
       SourceVersion sourceVersion,
-      DaggerTypes types,
-      KeyFactory keyFactory,
-      CompilerOptions compilerOptions,
-      BindingGraphFactory bindingGraphFactory) {
+      ComponentImplementationFactory componentImplementationFactory) {
     super(filer, elements, sourceVersion);
-    this.types = types;
-    this.elements = elements;
-    this.keyFactory = keyFactory;
-    this.compilerOptions = compilerOptions;
-    this.bindingGraphFactory = bindingGraphFactory;
+    this.componentImplementationFactory = componentImplementationFactory;
   }
 
   @Override
   ClassName nameGeneratedType(BindingGraph input) {
-    return componentName(input.componentType());
+    return componentName(input.componentTypeElement());
   }
 
   static ClassName componentName(TypeElement componentDefinitionType) {
@@ -67,20 +57,14 @@ final class ComponentGenerator extends SourceFileGenerator<BindingGraph> {
 
   @Override
   Element originatingElement(BindingGraph input) {
-    return input.componentType();
+    return input.componentTypeElement();
   }
 
   @Override
-  Optional<TypeSpec.Builder> write(ClassName componentName, BindingGraph input) {
-    return Optional.of(
-        ComponentModelBuilder.buildComponentModel(
-                types,
-                elements,
-                keyFactory,
-                compilerOptions,
-                componentName,
-                input,
-                bindingGraphFactory)
-            .generate());
+  Optional<TypeSpec.Builder> write(ClassName componentName, BindingGraph bindingGraph) {
+    ComponentImplementation componentImplementation =
+        componentImplementationFactory.createComponentImplementation(bindingGraph);
+    verify(componentImplementation.name().equals(componentName));
+    return Optional.of(componentImplementation.generate());
   }
 }

@@ -62,8 +62,7 @@ final class SubcomponentNames {
     ImmutableListMultimap<String, ComponentDescriptor> componentDescriptorsBySimpleName =
         Multimaps.index(
             graph.componentDescriptors(),
-            componentDescriptor ->
-                componentDescriptor.componentDefinitionType().getSimpleName().toString());
+            componentDescriptor -> componentDescriptor.typeElement().getSimpleName().toString());
     ImmutableMap<ComponentDescriptor, Namer> componentNamers =
         qualifiedNames(graph.componentDescriptors());
     Map<ComponentDescriptor, String> subcomponentImplSimpleNames = new LinkedHashMap<>();
@@ -82,12 +81,14 @@ final class SubcomponentNames {
       KeyFactory keyFactory, ImmutableMap<ComponentDescriptor, String> subcomponentNames) {
     ImmutableMap.Builder<Key, String> builder = ImmutableMap.builder();
     subcomponentNames.forEach(
-        (component, name) -> {
-          if (component.builderSpec().isPresent()) {
-            TypeMirror builderType = component.builderSpec().get().builderDefinitionType().asType();
-            builder.put(keyFactory.forSubcomponentBuilder(builderType), name);
-          }
-        });
+        (component, name) ->
+            component
+                .creatorDescriptor()
+                .ifPresent(
+                    creatorDescriptor -> {
+                      TypeMirror creatorType = creatorDescriptor.typeElement().asType();
+                      builder.put(keyFactory.forSubcomponentCreator(creatorType), name);
+                    }));
     return builder.build();
   }
 
@@ -125,7 +126,7 @@ final class SubcomponentNames {
       Iterable<ComponentDescriptor> componentDescriptors) {
     ImmutableMap.Builder<ComponentDescriptor, Namer> builder = ImmutableMap.builder();
     for (ComponentDescriptor component : componentDescriptors) {
-      builder.put(component, new Namer(component.componentDefinitionType()));
+      builder.put(component, new Namer(component.typeElement()));
     }
     return builder.build();
   }

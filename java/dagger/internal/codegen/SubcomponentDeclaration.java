@@ -19,7 +19,7 @@ package dagger.internal.codegen;
 import static com.google.auto.common.AnnotationMirrors.getAnnotationElementAndValue;
 import static dagger.internal.codegen.ConfigurationAnnotations.getModuleAnnotation;
 import static dagger.internal.codegen.ConfigurationAnnotations.getModuleSubcomponents;
-import static dagger.internal.codegen.ConfigurationAnnotations.getSubcomponentBuilder;
+import static dagger.internal.codegen.ConfigurationAnnotations.getSubcomponentCreator;
 
 import com.google.auto.common.MoreTypes;
 import com.google.auto.value.AutoValue;
@@ -28,7 +28,7 @@ import dagger.model.Key;
 import java.util.Optional;
 import javax.inject.Inject;
 import javax.lang.model.element.AnnotationMirror;
-import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.Element;
 import javax.lang.model.element.TypeElement;
 
 /**
@@ -43,9 +43,6 @@ abstract class SubcomponentDeclaration extends BindingDeclaration {
    */
   @Override
   public abstract Key key();
-
-  @Override
-  abstract Optional<ExecutableElement > bindingElement();
 
   /**
    * The type element that defines the {@link dagger.Subcomponent} or {@link
@@ -66,16 +63,16 @@ abstract class SubcomponentDeclaration extends BindingDeclaration {
     ImmutableSet<SubcomponentDeclaration> forModule(TypeElement module) {
       ImmutableSet.Builder<SubcomponentDeclaration> declarations = ImmutableSet.builder();
       AnnotationMirror moduleAnnotation = getModuleAnnotation(module).get();
-      ExecutableElement subcomponentAttribute =
+      Element subcomponentAttribute =
           getAnnotationElementAndValue(moduleAnnotation, "subcomponents").getKey();
       for (TypeElement subcomponent :
           MoreTypes.asTypeElements(getModuleSubcomponents(moduleAnnotation))) {
         declarations.add(
             new AutoValue_SubcomponentDeclaration(
-                Optional.of(module),
-                keyFactory.forSubcomponentBuilder(
-                    getSubcomponentBuilder(subcomponent).get().asType()),
                 Optional.of(subcomponentAttribute),
+                Optional.of(module),
+                keyFactory.forSubcomponentCreator(
+                    getSubcomponentCreator(subcomponent).get().asType()),
                 subcomponent,
                 moduleAnnotation));
       }
